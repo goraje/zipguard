@@ -32,6 +32,12 @@ permits the algorithms and modes required by the WinZip AES format. Do not use
 the legacy ZipCrypto option for FIPS-constrained data; it is a compatibility
 feature and is not a FIPS-approved encryption algorithm.
 
+WinZip AES output uses AES version 2 by default. Version 2 omits the plaintext
+CRC-32 from ZIP metadata, reducing offline candidate-guessing disclosure.
+Select `ZipFileExtra(force_wz_aes_version=1)` only when compatibility with a
+consumer that requires AES version 1 is more important than that metadata
+protection; version 1 stores the plaintext CRC-32 in both ZIP headers.
+
 ## What it provides?
 
 - a familiar `ZipFile` API.
@@ -155,6 +161,10 @@ with ZipFile(
     zf.setpassword(password)
     zf.writestr("secret.txt", b"legacy compatible payload")
 ```
+
+ZipCrypto is retained for legacy interoperability only. It is not a modern
+confidentiality mechanism and is unsuitable for FIPS-constrained or otherwise
+security-sensitive new archives; use WinZip AES instead.
 
 ### Using in-memory buffers
 

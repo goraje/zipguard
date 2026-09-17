@@ -85,6 +85,10 @@ try:
             """
             return self._d.unconsumed_tail
 
+        @property
+        def needs_input(self) -> bool:
+            return not self._d.unconsumed_tail
+
         def decompress(self, data: bytes, max_length: int = -1) -> bytes:
             """Decompresses a chunk of data.
 

@@ -296,6 +296,8 @@ class AesZipEncryptor(BaseZipEncryptor):
 
         if nbits not in (128, 192, 256):
             raise RuntimeError("`nbits` must be one of 128, 192, 256. Got '%s'" % nbits)
+        if force_wz_aes_version not in (None, WZ_AES_V1, WZ_AES_V2):
+            raise ValueError("force_wz_aes_version must be 1 or 2")
 
         self.force_wz_aes_version = force_wz_aes_version
         self.aes_strength = _NBITS_TO_STRENGTH[nbits]

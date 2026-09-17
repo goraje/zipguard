@@ -1,6 +1,9 @@
 [project]
 name = "ziplet"
-version = "0.1.0"
+dynamic = ["version"]
+authors = [
+    { name = "Jerzy Góra", email = "goraje@users.noreply.github.com" },
+]
 description = "ZIP library derived from CPython zipfile with WinZip AES and ZipCrypto support"
 readme = "README.md"
 license = "MIT"
@@ -28,8 +31,11 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["uv_build>=0.11.2,<0.12.0"]
-build-backend = "uv_build"
+requires = ["hatch-vcs>=0.5.0", "hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
 
 [dependency-groups]
 dev = [
@@ -49,6 +55,11 @@ lint.select = [
     "PIE",
     "PT",
     "W",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "windows: tests that require a Windows runner and 7-Zip",
 ]
 
 [tool.typos.default.extend-words]

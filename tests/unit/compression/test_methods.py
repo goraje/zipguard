@@ -94,7 +94,7 @@ class TestDecompressorBase:
             def eof(self) -> bool:
                 return True
 
-            def decompress(self, data: bytes) -> bytes:
+            def decompress(self, data: bytes, max_length: int = -1) -> bytes:
                 return data
 
         d = _Passthrough()
@@ -175,7 +175,7 @@ class TestCompressionEntry:
             def eof(self) -> bool:
                 return True
 
-            def decompress(self, data: bytes) -> bytes:
+            def decompress(self, data: bytes, max_length: int = -1) -> bytes:
                 return data
 
         compressor = _DummyCompressor()

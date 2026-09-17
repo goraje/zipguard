@@ -8,6 +8,9 @@ from ziplet.compression.methods import (
     CompressorBase,
     DecompressorBase,
 )
+from ziplet.exceptions import BadZipFile
+
+_MAX_LZMA_DICT_SIZE = 1 << 30
 
 try:
     import lzma
@@ -49,11 +52,18 @@ try:
             ``filters`` argument to ``lzma.LZMACompressor`` or
             ``lzma.LZMADecompressor`` with ``FORMAT_RAW``.
         """
+        if len(props) != 5:
+            raise BadZipFile("Invalid LZMA properties")
         props_byte = props[0]
         lc = props_byte % 9
         lp = (props_byte // 9) % 5
         pb = props_byte // 45
         (dict_size,) = struct.unpack("<I", props[1:5])
+        if dict_size > _MAX_LZMA_DICT_SIZE:
+            raise BadZipFile(
+                f"LZMA dictionary size {dict_size} exceeds the supported limit "
+                f"of {_MAX_LZMA_DICT_SIZE} bytes"
+            )
         return {
             "id": lzma.FILTER_LZMA1,
             "lc": lc,
@@ -161,7 +171,11 @@ try:
             """
             return self._eof
 
-        def decompress(self, data: bytes) -> bytes:
+        @property
+        def needs_input(self) -> bool:
+            return self._decomp is None or self._decomp.needs_input
+
+        def decompress(self, data: bytes, max_length: int = -1) -> bytes:
             """Decompresses a chunk of data.
 
             Accumulates data until the ZIP LZMA header is complete, then
@@ -191,7 +205,7 @@ try:
                 del self._unconsumed
 
             assert self._decomp is not None
-            result = self._decomp.decompress(data)
+            result = self._decomp.decompress(data, max_length)
             self._eof = self._decomp.eof
             return result
 

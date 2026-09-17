@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -27,10 +28,17 @@ from ziplet import ZipFile, ZipFileExtra
 
 SZ_EXE = Path("7z")
 
-pytestmark = pytest.mark.skipif(
-    not shutil.which(SZ_EXE),
-    reason="7-Zip not found in PATH; required for interoperability tests",
-)
+pytestmark = [
+    pytest.mark.windows,
+    pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="7-Zip interoperability tests run on Windows only",
+    ),
+    pytest.mark.skipif(
+        not shutil.which(SZ_EXE),
+        reason="7-Zip not found in PATH; required for interoperability tests",
+    ),
+]
 
 # ---------------------------------------------------------------------------
 # Shared test data

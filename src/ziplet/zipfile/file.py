@@ -364,14 +364,19 @@ class ZipFileExtra:
 
     Attributes:
         force_wz_aes_version: Override the WinZip AES version written to the
-            extra field (``1`` or ``2``). ``None`` selects the version
-            automatically based on file size and compression type.
+            extra field (``1`` or ``2``). ``None`` selects the metadata-safe
+            AES version 2. Version 1 exposes the plaintext CRC and should only
+            be selected for compatibility with older tools.
         wz_aes_nbits: AES key size in bits (``128``, ``192``, or ``256``).
             Defaults to ``256``.
     """
 
     force_wz_aes_version: int | None = None
     wz_aes_nbits: int = 256
+
+    def __post_init__(self) -> None:
+        if self.force_wz_aes_version not in (None, 1, 2):
+            raise ValueError("force_wz_aes_version must be 1 or 2")
 
 
 class ZipFile:

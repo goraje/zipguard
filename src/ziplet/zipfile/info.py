@@ -509,11 +509,9 @@ class ZipInfo:
         *compress_type* are returned unchanged.
 
         For AES entries, *compress_type* is overridden to
-        ``WZ_AES_COMPRESS_TYPE`` (99). When ``wz_aes_version`` is ``None`` it
-        is inferred automatically: ``WZ_AES_V2`` is chosen for files smaller
-        than 20 bytes or compressed with bzip2 (integrity is already provided
-        by the compression); otherwise ``WZ_AES_V1`` is used. ``WZ_AES_V2``
-        entries have their CRC zeroed.
+        ``WZ_AES_COMPRESS_TYPE`` (99). When ``wz_aes_version`` is ``None``,
+        ``WZ_AES_V2`` is selected. Version 2 entries have their CRC zeroed;
+        version 1 is retained only when explicitly requested for compatibility.
 
         Args:
             crc: CRC-32 of the uncompressed data.
@@ -529,16 +527,9 @@ class ZipInfo:
             compress_type = WZ_AES_COMPRESS_TYPE
             aes_version = self.aes_extra.wz_aes_version
             if aes_version is None:
-                if self.file_size < 20 or self.compress_type == ZIP_BZIP2:
-                    # The only difference between version 1 and 2 is the
-                    # handling of the CRC values. For version 2 the CRC value
-                    # is not used and must be set to 0.
-                    # For small files, the CRC can leak the contents of the
-                    # encrypted data. For bzip2, the compression already has
-                    # integrity checks so CRC is not required.
-                    aes_version = WZ_AES_V2
-                else:
-                    aes_version = WZ_AES_V1
+                aes_version = WZ_AES_V2
+            if aes_version not in (WZ_AES_V1, WZ_AES_V2):
+                raise ValueError("force_wz_aes_version must be 1 or 2")
             if aes_version == WZ_AES_V2:
                 crc = 0
             wz_aes_extra = struct.pack(

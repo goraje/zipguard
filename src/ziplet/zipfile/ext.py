@@ -62,7 +62,7 @@ class ZipExtFile(io.BufferedIOBase):
     """
 
     # Max size supported by decompressor.
-    MAX_N: int = 1 << 31 - 1
+    MAX_N: int = (1 << 31) - 1
 
     # Read from compressed files in 4k blocks.
     MIN_READ_SIZE: int = 4096
@@ -519,7 +519,8 @@ class ZipExtFile(io.BufferedIOBase):
         if self._eof or n <= 0:
             return b""
 
-        # Read from file.
+        # Read from file. Bounded decompressors may have output buffered
+        # internally, so drain that output before consuming more input.
         if self._compress_type == ZIP_DEFLATED:
             assert self._decompressor is not None
             assert isinstance(self._decompressor, StreamingDecompressor)
@@ -527,15 +528,20 @@ class ZipExtFile(io.BufferedIOBase):
             data = self._decompressor.unconsumed_tail
             if n > len(data):
                 data += self._read2(n - len(data))
-        else:
+        elif self._compress_type == ZIP_STORED:
             data = self._read2(n)
+        else:
+            assert self._decompressor is not None
+            if getattr(self._decompressor, "needs_input", True):
+                data = self._read2(n)
+            else:
+                data = b""
 
         if self._compress_type == ZIP_STORED:
             self._eof = self._compress_left <= 0
         elif self._compress_type == ZIP_DEFLATED:
             assert self._decompressor is not None
             assert isinstance(self._decompressor, StreamingDecompressor)
-            n = max(n, self.MIN_READ_SIZE)
             data = self._decompressor.decompress(data, n)
             self._eof = self._decompressor.eof or (
                 self._compress_left <= 0 and not self._decompressor.unconsumed_tail
@@ -544,7 +550,7 @@ class ZipExtFile(io.BufferedIOBase):
                 data += self._decompressor.flush()
         else:
             assert self._decompressor is not None
-            data = self._decompressor.decompress(data)
+            data = self._decompressor.decompress(data, n)
             self._eof = self._decompressor.eof or self._compress_left <= 0
 
         data = data[: self._left]

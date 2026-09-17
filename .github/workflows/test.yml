@@ -115,3 +115,30 @@ jobs:
 
       - name: Run pytest with coverage
         run: uv run pytest -v --cov=src/ziplet --cov-report=term
+
+  pytest-windows-7zip:
+    name: pytest Windows 7-Zip interoperability
+    runs-on: windows-latest
+    needs: lint
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Verify 7-Zip
+        shell: pwsh
+        run: 7z i
+
+      - name: Install project and dev dependencies
+        run: uv sync
+
+      - name: Run 7-Zip interoperability tests
+        run: uv run pytest -v -m windows tests/functional/test_7zip_interop.py

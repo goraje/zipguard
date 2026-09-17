@@ -76,11 +76,12 @@ class DecompressorBase(ABC):
         ...
 
     @abstractmethod
-    def decompress(self, data: bytes) -> bytes:
+    def decompress(self, data: bytes, max_length: int = -1) -> bytes:
         """Decompresses a chunk of data.
 
         Args:
             data: The compressed bytes to decompress.
+            max_length: Maximum output size, or ``-1`` for no limit.
 
         Returns:
             Decompressed bytes.
@@ -129,6 +130,15 @@ class StreamingDecompressor(DecompressorBase):
             Decompressed bytes, up to max_length bytes if specified.
         """
         ...
+
+    @property
+    def needs_input(self) -> bool:
+        """Whether the decompressor needs more compressed input.
+
+        Custom decompressors that do not buffer output retain the historical
+        behavior by using the default value.
+        """
+        return True
 
 
 @dataclass(frozen=True)

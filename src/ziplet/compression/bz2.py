@@ -69,7 +69,11 @@ try:
             """
             return self._d.eof
 
-        def decompress(self, data: bytes) -> bytes:
+        @property
+        def needs_input(self) -> bool:
+            return self._d.needs_input
+
+        def decompress(self, data: bytes, max_length: int = -1) -> bytes:
             """Decompresses a chunk of data.
 
             Args:
@@ -78,7 +82,7 @@ try:
             Returns:
                 Decompressed bytes.
             """
-            return self._d.decompress(data)
+            return self._d.decompress(data, max_length)
 
     compression_entry: CompressionEntry | None = CompressionEntry(
         compression_method=ZIP_BZIP2,
