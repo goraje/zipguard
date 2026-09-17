@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+import pytest
+
+from ziplet.compression.methods import (
+    BZIP2_VERSION,
+    LZMA_VERSION,
+    ZIP_BZIP2,
+    ZIP_DEFLATED,
+    ZIP_LZMA,
+    ZIP_STORED,
+    ZIP_ZSTANDARD,
+    ZSTANDARD_VERSION,
+    CompressionEntry,
+    CompressorBase,
+    DecompressorBase,
+    StreamingDecompressor,
+)
+
+
+class TestCompressionMethodConstants:
+    def test_zip_stored(self) -> None:
+        assert ZIP_STORED == 0
+
+    def test_zip_deflated(self) -> None:
+        assert ZIP_DEFLATED == 8
+
+    def test_zip_bzip2(self) -> None:
+        assert ZIP_BZIP2 == 12
+
+    def test_zip_lzma(self) -> None:
+        assert ZIP_LZMA == 14
+
+    def test_zip_zstandard(self) -> None:
+        assert ZIP_ZSTANDARD == 93
+
+    def test_bzip2_version(self) -> None:
+        assert BZIP2_VERSION == 46
+
+    def test_lzma_version(self) -> None:
+        assert LZMA_VERSION == 63
+
+    def test_zstandard_version(self) -> None:
+        assert ZSTANDARD_VERSION == 63
+
+    def test_all_method_ids_distinct(self) -> None:
+        ids = [ZIP_STORED, ZIP_DEFLATED, ZIP_BZIP2, ZIP_LZMA, ZIP_ZSTANDARD]
+        assert len(ids) == len(set(ids))
+
+
+class TestCompressorBase:
+    def test_cannot_instantiate_directly(self) -> None:
+        with pytest.raises(TypeError):
+            CompressorBase()  # type: ignore[abstract]
+
+    def test_concrete_subclass_requires_compress_and_flush(self) -> None:
+        class _Incomplete(CompressorBase):
+            def compress(self, data: bytes) -> bytes:
+                return data
+
+        with pytest.raises(TypeError):
+            _Incomplete()  # type: ignore[abstract]
+
+    def test_concrete_subclass_works(self) -> None:
+        class _Passthrough(CompressorBase):
+            def compress(self, data: bytes) -> bytes:
+                return data
+
+            def flush(self) -> bytes:
+                return b""
+
+        c = _Passthrough()
+        assert c.compress(b"hello") == b"hello"
+        assert c.flush() == b""
+
+
+class TestDecompressorBase:
+    def test_cannot_instantiate_directly(self) -> None:
+        with pytest.raises(TypeError):
+            DecompressorBase()  # type: ignore[abstract]
+
+    def test_concrete_subclass_requires_eof_and_decompress(self) -> None:
+        class _Incomplete(DecompressorBase):
+            @property
+            def eof(self) -> bool:
+                return False
+
+        with pytest.raises(TypeError):
+            _Incomplete()  # type: ignore[abstract]
+
+    def test_concrete_subclass_works(self) -> None:
+        class _Passthrough(DecompressorBase):
+            @property
+            def eof(self) -> bool:
+                return True
+
+            def decompress(self, data: bytes) -> bytes:
+                return data
+
+        d = _Passthrough()
+        assert d.eof is True
+        assert d.decompress(b"hello") == b"hello"
+
+
+class TestStreamingDecompressor:
+    def test_is_subclass_of_decompressor_base(self) -> None:
+        assert issubclass(StreamingDecompressor, DecompressorBase)
+
+    def test_cannot_instantiate_directly(self) -> None:
+        with pytest.raises(TypeError):
+            StreamingDecompressor()  # type: ignore[abstract]
+
+    def test_concrete_subclass_works(self) -> None:
+        class _PassthroughStreaming(StreamingDecompressor):
+            @property
+            def eof(self) -> bool:
+                return False
+
+            @property
+            def unconsumed_tail(self) -> bytes:
+                return b""
+
+            def flush(self) -> bytes:
+                return b""
+
+            def decompress(self, data: bytes, max_length: int = -1) -> bytes:
+                return data if max_length < 0 else data[:max_length]
+
+        d = _PassthroughStreaming()
+        assert d.eof is False
+        assert d.unconsumed_tail == b""
+        assert d.flush() == b""
+        assert d.decompress(b"hello") == b"hello"
+        assert (
+            d.decompress(b"hello", max_length=3) == b"hel"  # spellchecker:disable-line
+        )
+
+
+class TestCompressionEntry:
+    def test_is_frozen_dataclass(self) -> None:
+        entry = CompressionEntry(
+            compression_method=0,
+            compressor_factory=lambda _level: None,
+            decompressor_factory=lambda: None,
+        )
+        with pytest.raises((AttributeError, TypeError)):
+            entry.compression_method = 99  # type: ignore[misc]  # ty: ignore[invalid-assignment]
+
+    def test_fields_accessible(self) -> None:
+        def factory_c(_level: int | None) -> CompressorBase | None:
+            return None
+
+        def factory_d() -> DecompressorBase | None:
+            return None
+
+        entry = CompressionEntry(
+            compression_method=42,
+            compressor_factory=factory_c,
+            decompressor_factory=factory_d,
+        )
+        assert entry.compression_method == 42
+        assert entry.compressor_factory is factory_c
+        assert entry.decompressor_factory is factory_d
+
+    def test_compressor_factory_called(self) -> None:
+        class _DummyCompressor(CompressorBase):
+            def compress(self, data: bytes) -> bytes:
+                return data
+
+            def flush(self) -> bytes:
+                return b""
+
+        class _DummyDecompressor(DecompressorBase):
+            @property
+            def eof(self) -> bool:
+                return True
+
+            def decompress(self, data: bytes) -> bytes:
+                return data
+
+        compressor = _DummyCompressor()
+        decompressor = _DummyDecompressor()
+        entry = CompressionEntry(
+            compression_method=0,
+            compressor_factory=lambda _level: compressor,
+            decompressor_factory=lambda: decompressor,
+        )
+        assert entry.compressor_factory(5) is compressor
+        assert entry.decompressor_factory() is decompressor

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="278 82 416 165" role="img" aria-labelledby="title desc">
+  <title id="title">ziplet logo</title>
+  <desc id="desc">The ziplet wordmark with a centered gradient progress bar beneath it.</desc>
+  <defs>
+    <linearGradient id="brandGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#c99568"/>
+      <stop offset="32%" stop-color="#c99568"/>
+      <stop offset="68%" stop-color="#6ca79e"/>
+      <stop offset="100%" stop-color="#6ca79e"/>
+    </linearGradient>
+    <linearGradient id="barGradient" x1="300" y1="236" x2="660" y2="236" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#c99568"/>
+      <stop offset="32%" stop-color="#c99568"/>
+      <stop offset="68%" stop-color="#6ca79e"/>
+      <stop offset="100%" stop-color="#6ca79e"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(480 98)">
+    <text x="0" y="78" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="96" font-weight="700" letter-spacing="1" fill="url(#brandGradient)">ziplet</text>
+    <path d="M-180 138h360" stroke="url(#barGradient)" stroke-opacity="0.28" stroke-width="10" stroke-linecap="round"/>
+    <path d="M-180 138h209" stroke="url(#barGradient)" stroke-width="10" stroke-linecap="round"/>
+  </g>
+</svg>

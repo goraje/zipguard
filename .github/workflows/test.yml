@@ -1,0 +1,117 @@
+name: test
+
+run-name: >-
+  ${{
+    github.event_name == 'pull_request' &&
+    github.event.pull_request.title ||
+    format('{0}-{1}', github.ref_name, github.sha)
+  }}
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Run typos
+        run: uvx typos
+
+      - name: Run ruff check
+        run: uvx ruff check .
+
+      - name: Run ruff format
+        run: uvx ruff format --check .
+
+  ty:
+    name: ty
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Run ty check
+        run: uv run --group dev --with ty ty check
+
+  mypy:
+    name: mypy ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install project and dev dependencies
+        run: uv sync
+
+      - name: Run mypy --strict
+        run: uv run mypy --strict src tests
+
+  pytest:
+    name: pytest ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    needs: [ty, mypy]
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install project and dev dependencies
+        run: uv sync
+
+      - name: Run pytest with coverage
+        run: uv run pytest -v --cov=src/ziplet --cov-report=term
