@@ -250,6 +250,32 @@ structured result. Size limits are enforced both from archive metadata before
 extraction and against actual bytes written during extraction; an actual-size
 quota breach aborts that member and removes its partial output.
 
+### Metadata-only inspection
+
+Use `ZipFile.inspect()` to produce a structured report before extraction.
+Inspection reads the central directory and member metadata only: it never
+opens, decompresses, decrypts, or writes a payload, and policy findings never
+raise `ExtractionError`.
+
+```python
+from ziplet import ExtractPolicy, ZipFile
+
+with ZipFile("input.zip") as zf:
+    report = zf.inspect(policy=ExtractPolicy(max_compression_ratio=100.0))
+
+print(report.total_entries, report.total_uncompressed_size)
+print(report.suspicious_paths, report.encrypted_members)
+print(report.duplicate_member_names, report.duplicate_targets)
+for member in report.members:
+    print(member.member, member.violations)
+```
+
+The report separately identifies duplicate member names and duplicate
+filesystem targets, suspicious paths, encrypted members, symlinks and special
+files, large members, compression-ratio outliers, and entry/size policy
+findings. `path=` controls the destination used for non-mutating target
+resolution; it does not create or modify that path.
+
 ## Public API
 
 The package exports these primary entry points:
@@ -258,6 +284,7 @@ The package exports these primary entry points:
 - `is_zipfile`
 - `INHERIT_ENCRYPTION`
 - `ExtractPolicy`, `ExtractResult`, `ExtractMemberResult`, `ExtractionError`
+- `InspectionMember`, `InspectionResult`
 - `ZipFileExtra`
 - `WZ_AES`, `WZ_AES_V1`, `WZ_AES_V2`
 - `ZIP_CRYPTO`

@@ -24,6 +24,7 @@ from ziplet.zipfile.file import (
     is_zipfile,
 )
 from ziplet.zipfile.info import WzAesExtra
+from ziplet.zipfile.inspection import InspectionMember, InspectionResult
 
 __all__ = [
     "WZ_AES",
@@ -49,4 +50,6 @@ __all__ = [
     "MemberStatus",
     "OverwritePolicy",
     "ViolationAction",
+    "InspectionMember",
+    "InspectionResult",
 ]

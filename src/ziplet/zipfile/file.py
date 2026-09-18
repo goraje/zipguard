@@ -11,7 +11,7 @@ import struct
 import threading
 import warnings
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import TracebackType
 from typing import IO, TYPE_CHECKING, Any, Literal, TypeAlias, cast, overload
@@ -52,6 +52,7 @@ from ziplet.zipfile.extract import (
     normalized_destination,
 )
 from ziplet.zipfile.info import ZipInfo
+from ziplet.zipfile.inspection import InspectionMember, InspectionResult
 from ziplet.zipfile.io_wrappers import (
     ClosableZipStream,
     Tellable,
@@ -90,6 +91,8 @@ __all__ = [
     "is_zipfile",
     "INHERIT_ENCRYPTION",
     "EncryptionOverride",
+    "InspectionMember",
+    "InspectionResult",
 ]
 
 # ---------------------------------------------------------------------------
@@ -764,6 +767,187 @@ class ZipFile:
             The internal :attr:`filelist` in central-directory order.
         """
         return self.filelist
+
+    def inspect(
+        self,
+        path: _StrPath | None = None,
+        policy: ExtractPolicy | None = None,
+    ) -> InspectionResult:
+        """Inspect archive metadata without opening or processing payloads.
+
+        No member data is read, decompressed, decrypted, or written.  Policy
+        findings are returned in the report and never raise
+        :class:`ExtractionError`.
+        """
+        effective_policy = (
+            policy
+            if policy is not None
+            else replace(
+                ExtractPolicy(),
+                allow_overwrite=True,
+                overwrite_policy=OverwritePolicy.REPLACE,
+                max_member_size=None,
+                max_total_uncompressed_size=None,
+                max_entries=None,
+                max_compression_ratio=None,
+            )
+        )
+        destination = normalized_destination(path or os.getcwd())
+        policy_root = (
+            normalized_destination(effective_policy.destination_root)
+            if effective_policy.destination_root is not None
+            else destination
+        )
+        targets: dict[Path, str] = {}
+        name_counts: dict[str, int] = {}
+        members: list[InspectionMember] = []
+        violations: list[ExtractViolation] = []
+        total_compressed_size = 0
+        total_size = 0
+        duplicate_targets: list[Path] = []
+        encrypted: list[str] = []
+        suspicious: list[str] = []
+        large: list[str] = []
+        ratio_outliers: list[str] = []
+        symlinks: list[str] = []
+        special_files: list[str] = []
+
+        count_over = (
+            effective_policy.max_entries is not None
+            and len(self.filelist) > effective_policy.max_entries
+        )
+        if count_over:
+            violations.append(
+                ExtractViolation(
+                    "<archive>",
+                    "max_entries",
+                    f"archive contains {len(self.filelist)} entries, "
+                    f"limit is {effective_policy.max_entries}",
+                    effective_policy.on_violation,
+                )
+            )
+
+        for index, info in enumerate(self.filelist):
+            name_counts[info.filename] = name_counts.get(info.filename, 0) + 1
+            before = set(targets)
+            target, member_violations = self._evaluate_extract_member(
+                info, destination, policy_root, effective_policy, targets
+            )
+            # _evaluate_extract_member intentionally only records duplicates
+            # when extraction is configured to reject them.  Inspection always
+            # reports duplicate targets as an independent archive property.
+            if target is not None and target in before:
+                duplicate_targets.append(target)
+            total_size += info.file_size
+            total_compressed_size += info.compress_size
+            if (
+                effective_policy.max_total_uncompressed_size is not None
+                and total_size > effective_policy.max_total_uncompressed_size
+            ):
+                member_violations.append(
+                    ExtractViolation(
+                        info.filename,
+                        "max_total_uncompressed_size",
+                        "total declared uncompressed size exceeds policy limit",
+                        effective_policy.on_violation,
+                        target,
+                    )
+                )
+            if (
+                effective_policy.max_entries is not None
+                and index >= effective_policy.max_entries
+            ):
+                member_violations.append(
+                    ExtractViolation(
+                        info.filename,
+                        "max_entries",
+                        "archive entry count exceeds policy limit",
+                        effective_policy.on_violation,
+                        target,
+                    )
+                )
+            member_violations = [
+                ExtractViolation(
+                    violation.member,
+                    violation.code,
+                    violation.message,
+                    effective_policy.on_violation
+                    if violation.action == ViolationAction.ERROR
+                    else violation.action,
+                    violation.target,
+                )
+                for violation in member_violations
+            ]
+            mode = (info.external_attr >> 16) & 0o170000
+            is_link = stat.S_ISLNK(mode)
+            is_special = bool(
+                mode
+                and not is_link
+                and not stat.S_ISREG(mode)
+                and not stat.S_ISDIR(mode)
+            )
+            ratio = (
+                None if info.compress_size == 0 else info.file_size / info.compress_size
+            )
+            if info.flag_bits & MASK_ENCRYPTED:
+                encrypted.append(info.filename)
+            if is_link:
+                symlinks.append(info.filename)
+            if is_special:
+                special_files.append(info.filename)
+            if any(
+                violation.code
+                in {
+                    "absolute_path",
+                    "windows_path",
+                    "windows_drive_path",
+                    "parent_traversal",
+                    "outside_root",
+                }
+                for violation in member_violations
+            ):
+                suspicious.append(info.filename)
+            if any(v.code == "max_member_size" for v in member_violations):
+                large.append(info.filename)
+            if any(v.code == "compression_ratio" for v in member_violations):
+                ratio_outliers.append(info.filename)
+            violations.extend(member_violations)
+            members.append(
+                InspectionMember(
+                    info.filename,
+                    target,
+                    info.is_dir(),
+                    info.compress_size,
+                    info.file_size,
+                    ratio,
+                    bool(info.flag_bits & MASK_ENCRYPTED),
+                    is_link,
+                    is_special,
+                    tuple(member_violations),
+                )
+            )
+
+        duplicate_names = tuple(
+            name for name, count in name_counts.items() if count > 1
+        )
+        warnings = tuple(v for v in violations if v.action == ViolationAction.WARN)
+        return InspectionResult(
+            len(self.filelist),
+            total_compressed_size,
+            total_size,
+            tuple(members),
+            duplicate_names,
+            tuple(dict.fromkeys(duplicate_targets)),
+            tuple(dict.fromkeys(suspicious)),
+            tuple(encrypted),
+            tuple(large),
+            tuple(ratio_outliers),
+            tuple(symlinks),
+            tuple(special_files),
+            warnings,
+            tuple(violations),
+            count_over,
+        )
 
     def printdir(self, file: IO[str] | None = None) -> None:
         """Print a formatted table of contents to *file*.
