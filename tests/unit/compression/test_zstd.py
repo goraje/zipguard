@@ -106,3 +106,17 @@ class TestZstdDecompressor:
         compressed = self._make_compressed()
         d.decompress(compressed)
         assert d.eof is True
+
+    def test_decompress_respects_max_length(self) -> None:
+        data = SAMPLE_DATA * 100
+        d = self._make_decompressor()
+        compressed = self._make_compressed(data)
+
+        output = b""
+        chunk = compressed
+        while not d.eof:
+            part = d.decompress(chunk, 17)
+            assert len(part) <= 17
+            output += part
+            chunk = b""
+        assert output == data

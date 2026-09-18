@@ -67,6 +67,10 @@ class ZipExtFile(io.BufferedIOBase):
     # Read from compressed files in 4k blocks.
     MIN_READ_SIZE: int = 4096
 
+    # Keep a forged compressed-size field from turning one logical read into
+    # an oversized allocation.  Large entries are still streamed over calls.
+    MAX_READ_SIZE: int = 1 << 20
+
     # Chunk size to read during seek
     MAX_SEEK_READ: int = 1 << 24
 
@@ -551,7 +555,11 @@ class ZipExtFile(io.BufferedIOBase):
         else:
             assert self._decompressor is not None
             data = self._decompressor.decompress(data, n)
-            self._eof = self._decompressor.eof or self._compress_left <= 0
+            # A bounded decompressor may still have output buffered after the
+            # compressed input has been consumed.  Only the decompressor can
+            # establish EOF; treating ``_compress_left == 0`` as EOF would
+            # truncate split-output reads and produce false CRC failures.
+            self._eof = self._decompressor.eof
 
         data = data[: self._left]
         self._left -= len(data)
@@ -583,7 +591,7 @@ class ZipExtFile(io.BufferedIOBase):
         if self._compress_left <= 0:
             return b""
 
-        n = max(n, self.MIN_READ_SIZE)
+        n = min(max(n, self.MIN_READ_SIZE), self.MAX_READ_SIZE)
         n = min(n, self._compress_left)
 
         data = self._fileobj.read(n)

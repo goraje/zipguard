@@ -128,3 +128,16 @@ class TestBz2Decompressor:
         compressed = c.compress(data) + c.flush()
         d = self._make_decompressor()
         assert d.decompress(compressed) == data
+
+    def test_decompress_respects_max_length(self) -> None:
+        data = SAMPLE_DATA * 100
+        d = self._make_decompressor()
+        compressed = self._make_compressed(data)
+
+        first = d.decompress(compressed, 17)
+        assert len(first) <= 17
+
+        output = first
+        while not d.eof:
+            output += d.decompress(b"", 17)
+        assert output == data

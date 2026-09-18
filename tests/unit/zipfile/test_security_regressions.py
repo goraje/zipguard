@@ -1,18 +1,52 @@
 from __future__ import annotations
 
+import io
 import struct
+from typing import Any, cast
 
 import pytest
 
+import ziplet
 from ziplet.compression import lzma
 from ziplet.exceptions import BadZipFile
 from ziplet.zipfile.ext import ZipExtFile
-from ziplet.zipfile.file import ZipFileExtra
+from ziplet.zipfile.file import ZipFileExtra, registry
 from ziplet.zipfile.info import ZipInfo
+from ziplet.zipfile.shared import (
+    sizeCentralDir,
+    sizeFileHeader,
+    stringCentralDir,
+    stringFileHeader,
+    structCentralDir,
+    structFileHeader,
+)
 
 
 def test_max_n_is_31_bit_maximum() -> None:
     assert ZipExtFile.MAX_N == (1 << 31) - 1
+    assert ZipExtFile.MAX_READ_SIZE == 1 << 20
+
+
+def test_read2_caps_forged_compressed_size_reads() -> None:
+    class CountingStream(io.BytesIO):
+        requested: int | None = None
+
+        def read(self, size: int | None = -1) -> bytes:
+            requested = -1 if size is None else size
+            self.requested = requested
+            return b"x" * min(requested, 16)
+
+    stream = CountingStream()
+    ext = ZipExtFile.__new__(ZipExtFile)
+    ext._fileobj = cast(Any, stream)
+    ext._close_fileobj = False
+    ext._compress_left = 1 << 40
+    ext._decrypter = None
+
+    data = ext._read2(ZipExtFile.MAX_N)
+
+    assert len(data) == 16
+    assert stream.requested == ZipExtFile.MAX_READ_SIZE
 
 
 def test_aes_version_override_is_validated() -> None:
@@ -41,3 +75,167 @@ def test_aes_defaults_to_version_two_and_zero_crc() -> None:
     _, _, version = struct.unpack("<HHH", extra[:6])
     assert version == 2
     assert crc == 0
+
+
+def _find_aes_metadata(archive: bytes) -> tuple[int, int, int, int]:
+    local_offset = archive.index(stringFileHeader)
+    local = struct.unpack(
+        structFileHeader,
+        archive[local_offset : local_offset + sizeFileHeader],
+    )
+    local_name_len, local_extra_len = local[10:12]
+    local_extra_start = local_offset + sizeFileHeader + local_name_len
+    local_extra = archive[local_extra_start : local_extra_start + local_extra_len]
+
+    central_offset = archive.index(stringCentralDir)
+    central = struct.unpack(
+        structCentralDir,
+        archive[central_offset : central_offset + sizeCentralDir],
+    )
+    central_name_len, central_extra_len = central[12:14]
+    central_extra_start = central_offset + sizeCentralDir + central_name_len
+    central_extra = archive[
+        central_extra_start : central_extra_start + central_extra_len
+    ]
+
+    def version(extra: bytes) -> int:
+        marker = struct.pack("<HH", 0x9901, 7)
+        start = extra.index(marker) + 4
+        return struct.unpack("<H", extra[start : start + 2])[0]
+
+    return local[7], central[9], version(local_extra), version(central_extra)
+
+
+@pytest.mark.parametrize(
+    ("compression", "payload"),
+    [
+        (ziplet.ZIP_STORED, b"small payload"),
+        (ziplet.ZIP_STORED, b"large payload " * 4096),
+        (ziplet.ZIP_DEFLATED, b"small payload"),
+        (ziplet.ZIP_DEFLATED, b"large payload " * 4096),
+        (ziplet.ZIP_BZIP2, b"large payload " * 4096),
+        (ziplet.ZIP_LZMA, b"large payload " * 4096),
+        (ziplet.ZIP_ZSTANDARD, b"large payload " * 4096),
+    ],
+)
+def test_read1_is_bounded_and_supports_split_reads(
+    tmp_path: Any,
+    compression: int,
+    payload: bytes,
+) -> None:
+    if not registry._registry.get(compression):
+        pytest.skip("compression method unavailable")
+
+    path = tmp_path / f"bounded-{compression}.zip"
+    with ziplet.ZipFile(path, "w", compression=compression) as zf:
+        zf.writestr("payload.bin", payload)
+
+    with ziplet.ZipFile(path) as zf:
+        with cast(ZipExtFile, zf.open("payload.bin")) as source:
+            chunks: list[bytes] = []
+            while True:
+                chunk = source.read1(17)
+                if not chunk:
+                    break
+                assert len(chunk) <= 17
+                chunks.append(chunk)
+            assert b"".join(chunks) == payload
+            assert source.read1(17) == b""
+
+            source.seek(len(payload) // 2)
+            start = len(payload) // 2
+            assert source.read(31) == payload[start : start + 31]
+            source.seek(0)
+            assert source.read() == payload
+
+
+@pytest.mark.parametrize(
+    "compression",
+    [ziplet.ZIP_DEFLATED, ziplet.ZIP_BZIP2, ziplet.ZIP_LZMA],
+)
+def test_truncated_compressed_member_raises(tmp_path: Any, compression: int) -> None:
+    if not registry._registry.get(compression):
+        pytest.skip("compression method unavailable")
+
+    path = tmp_path / f"truncated-{compression}.zip"
+    with ziplet.ZipFile(path, "w", compression=compression) as zf:
+        zf.writestr("payload.bin", b"payload " * 1024)
+    path.write_bytes(path.read_bytes()[:-30])
+
+    with pytest.raises((BadZipFile, EOFError)):
+        with ziplet.ZipFile(path) as zf:
+            zf.read("payload.bin")
+
+
+def test_crc_mismatch_is_detected(tmp_path: Any) -> None:
+    path = tmp_path / "crc.zip"
+    with ziplet.ZipFile(path, "w") as zf:
+        zf.writestr("payload.bin", b"payload")
+    archive = bytearray(path.read_bytes())
+    central_offset = archive.index(stringCentralDir)
+    archive[central_offset + 16 : central_offset + 20] = struct.pack("<L", 0)
+    path.write_bytes(archive)
+
+    with pytest.raises(BadZipFile, match="Bad CRC-32"):
+        with ziplet.ZipFile(path) as zf:
+            zf.read("payload.bin")
+
+
+@pytest.mark.parametrize("compression", [ziplet.ZIP_STORED, ziplet.ZIP_DEFLATED])
+@pytest.mark.parametrize("payload", [b"x", b"x" * 8192])
+def test_aes_headers_have_consistent_v2_metadata(
+    tmp_path: Any,
+    compression: int,
+    payload: bytes,
+) -> None:
+    path = tmp_path / f"aes-{compression}-{len(payload)}.zip"
+    with ziplet.ZipFile(
+        path, "w", compression=compression, encryption=ziplet.WZ_AES
+    ) as zf:
+        zf.setpassword(b"password")
+        zf.writestr("payload.bin", payload)
+
+    local_crc, central_crc, local_version, central_version = _find_aes_metadata(
+        path.read_bytes()
+    )
+    assert local_crc == central_crc == 0
+    assert local_version == central_version == ziplet.WZ_AES_V2
+
+
+def test_aes_v1_headers_preserve_crc(tmp_path: Any) -> None:
+    path = tmp_path / "aes-v1.zip"
+    payload = b"compatibility payload"
+    with ziplet.ZipFile(
+        path,
+        "w",
+        encryption=ziplet.WZ_AES,
+        extra=ziplet.ZipFileExtra(force_wz_aes_version=1),
+    ) as zf:
+        zf.setpassword(b"password")
+        zf.writestr("payload.bin", payload)
+
+    local_crc, central_crc, local_version, central_version = _find_aes_metadata(
+        path.read_bytes()
+    )
+    assert local_crc == central_crc
+    assert local_crc != 0
+    assert local_version == central_version == ziplet.WZ_AES_V1
+
+
+class _NonSeekableBytesIO(io.BytesIO):
+    def seekable(self) -> bool:
+        return False
+
+    def seek(self, *args: Any, **kwargs: Any) -> int:
+        raise io.UnsupportedOperation("not seekable")
+
+
+def test_aes_output_works_on_non_seekable_stream() -> None:
+    buffer = _NonSeekableBytesIO()
+    with ziplet.ZipFile(buffer, "w", encryption=ziplet.WZ_AES) as zf:
+        zf.setpassword(b"password")
+        zf.writestr("payload.bin", b"payload")
+
+    with ziplet.ZipFile(io.BytesIO(buffer.getvalue())) as zf:
+        zf.setpassword(b"password")
+        assert zf.read("payload.bin") == b"payload"

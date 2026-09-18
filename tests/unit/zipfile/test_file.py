@@ -104,6 +104,27 @@ class TestZipFileExtractSanitization:
             with pytest.raises(ValueError, match="Empty filename"):
                 zf.extract("../.", out)
 
+    @pytest.mark.parametrize(
+        "member_name",
+        ["C:/Windows/System32/drivers/etc/hosts", r"\\server\share\payload.txt"],
+    )
+    def test_extract_keeps_windows_prefixed_names_below_destination(
+        self,
+        tmp_path: Path,
+        member_name: str,
+    ) -> None:
+        path = tmp_path / "windows-names.zip"
+        out = tmp_path / "out"
+
+        with ZipFile(path, "w") as zf:
+            zf.writestr(member_name, b"safe")
+
+        with ZipFile(path, "r") as zf:
+            extracted = Path(zf.extract(member_name, out))
+
+        assert extracted.is_relative_to(out)
+        assert extracted.read_bytes() == b"safe"
+
 
 class TestZipFileCompressionValidation:
     def test_unknown_compression_raises(self, tmp_path: Path) -> None:

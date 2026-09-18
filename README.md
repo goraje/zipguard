@@ -1,7 +1,7 @@
 <!-- # ziplet -->
 
 <p align="center">
-	<img src="assets/ziplet-logo.svg" alt="ziplet logo" width="260">
+	<img src="https://raw.githubusercontent.com/goraje/ziplet/main/assets/ziplet-logo.svg" alt="ziplet logo" width="260">
 </p>
 
 <p align="center">
@@ -46,6 +46,12 @@ protection; version 1 stores the plaintext CRC-32 in both ZIP headers.
 - read support that auto-detects AES vs. ZipCrypto for encrypted members
 - support for `ZIP_STORED`, `ZIP_DEFLATED`, `ZIP_BZIP2`, `ZIP_LZMA` and
   `ZIP_ZSTANDARD` compression
+
+ZIP LZMA archives declare their dictionary size in the member stream. ziplet
+rejects dictionaries larger than 1 GiB before constructing a decompressor.
+This bounds attacker-controlled allocation while retaining compatibility with
+normal ZIP LZMA archives; applications handling untrusted archives should also
+apply extraction size and compression-ratio limits.
 
 ## Installation
 
@@ -204,6 +210,9 @@ The package exports these primary entry points:
 - `ZIP_ZSTANDARD` compression requires a Python runtime that provides zstandard support
 - use WinZip AES for modern encrypted ZIP workflows (ZipCrypto is mainly for compatibility with older tools)
 - passwords must be byte strings
+- decompression is streamed and bounded per read, but callers should still
+  enforce application-level limits on total extracted bytes and archive member
+  counts when processing untrusted archives
 
 ## Interoperability
 
