@@ -45,7 +45,6 @@ jobs:
   ty:
     name: ty
     runs-on: ubuntu-latest
-    needs: lint
 
     steps:
       - name: Check out repository
@@ -65,7 +64,6 @@ jobs:
   mypy:
     name: mypy ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    needs: lint
     strategy:
       fail-fast: false
       matrix:
@@ -92,7 +90,7 @@ jobs:
   pytest-unit:
     name: pytest unit ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    needs: [ty, mypy]
+    needs: [lint, ty, mypy]
     strategy:
       fail-fast: false
       matrix:
@@ -119,7 +117,7 @@ jobs:
   pytest-functional:
     name: pytest functional ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    needs: [ty, mypy]
+    needs: [lint, ty, mypy]
     strategy:
       fail-fast: false
       matrix:
@@ -146,7 +144,7 @@ jobs:
   pytest-windows-7zip:
     name: 7-zip
     runs-on: windows-latest
-    needs: lint
+    needs: [lint, ty, mypy]
 
     steps:
       - name: Check out repository

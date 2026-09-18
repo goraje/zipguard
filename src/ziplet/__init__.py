@@ -25,6 +25,7 @@ from ziplet.zipfile.file import (
 )
 from ziplet.zipfile.info import WzAesExtra
 from ziplet.zipfile.inspection import InspectionMember, InspectionResult
+from ziplet.zipfile.path import Path
 
 __all__ = [
     "WZ_AES",
@@ -52,4 +53,5 @@ __all__ = [
     "ViolationAction",
     "InspectionMember",
     "InspectionResult",
+    "Path",
 ]

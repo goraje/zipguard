@@ -28,8 +28,7 @@ repos:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
-        args: [--preview]
-        types_or: [python, pyi, markdown]
+        types_or: [python, pyi]
 
   - repo: local
     hooks:
