@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import struct
+import tempfile
 import threading
 import warnings
 from collections.abc import Iterable
@@ -84,7 +85,7 @@ from ziplet.zipfile.shared import (
     structEndArchive64Locator,
     structFileHeader,
 )
-from ziplet.zipfile.write import ZipWriteFile
+from ziplet.zipfile.write import WriteState, ZipWriteFile
 
 __all__ = [
     "ZipFile",
@@ -361,6 +362,10 @@ def _EndRecData(fpin: IO[bytes]) -> list[Any] | None:
         endrec = list(struct.unpack(structEndArchive, recData))
         commentSize = endrec[_ECD_COMMENT_SIZE]
         comment = data[start + sizeEndCentDir : start + sizeEndCentDir + commentSize]
+        if len(comment) != commentSize or start + sizeEndCentDir + commentSize > len(
+            data
+        ):
+            return None
         endrec.append(comment)
         endrec.append(maxCommentStart + start)
         return _EndRecData64(fpin, maxCommentStart + start, endrec)
@@ -449,6 +454,18 @@ class ZipFileExtra:
 
 
 class ZipFile:
+    _HARD_EXTRACTION_VIOLATIONS = frozenset(
+        {
+            "absolute_path",
+            "windows_drive_path",
+            "windows_path",
+            "parent_traversal",
+            "outside_root",
+            "symlink",
+            "special_file",
+            "unsafe_destination",
+        }
+    )
     """Read, write, and append ZIP archives.
 
     Supports standard ZIP compression (stored, deflate, bzip2, lzma, zstd),
@@ -571,6 +588,8 @@ class ZipFile:
             self.filename = getattr(file, "name", None)
         self._fileRefCnt = 1
         self._lock = threading.RLock()
+        self._write_condition = threading.Condition(self._lock)
+        self._active_writer: ZipWriteFile | None = None
         self._seekable = True
         self._writing = False
 
@@ -1343,7 +1362,16 @@ class ZipFile:
                 force_wz_aes_version=aes_version,
             )
 
-        return ZipWriteFile(self, zinfo, zip64, encryptor)
+        try:
+            writer = ZipWriteFile(self, zinfo, zip64, encryptor)
+        except BaseException:
+            self._writing = False
+            with self._write_condition:
+                self._active_writer = None
+                self._write_condition.notify_all()
+            raise
+        self._active_writer = writer
+        return writer
 
     @overload
     def extract(
@@ -1525,7 +1553,12 @@ class ZipFile:
                         v.member,
                         v.code,
                         v.message,
-                        policy.on_violation
+                        ViolationAction.ERROR
+                        if (
+                            v.code in self._HARD_EXTRACTION_VIOLATIONS
+                            and policy.on_violation == ViolationAction.WARN
+                        )
+                        else policy.on_violation
                         if v.action == ViolationAction.ERROR
                         else v.action,
                         v.target,
@@ -1595,10 +1628,14 @@ class ZipFile:
                     quota_total_limit=policy.max_total_uncompressed_size,
                     quota_total_written=total_written,
                 )
-                written = 0 if info.is_dir() else os.path.getsize(written_target)
+                entry_mode = (info.external_attr >> 16) & 0o170000
+                written = (
+                    0
+                    if info.is_dir() or stat.S_ISLNK(entry_mode) or entry_mode
+                    else os.path.getsize(written_target)
+                )
                 total_written += written
             except _ExtractionQuotaExceeded as exc:
-                target.unlink(missing_ok=True)
                 violation = ExtractViolation(
                     info.filename,
                     exc.code,
@@ -1823,6 +1860,7 @@ class ZipFile:
             mode
             and not stat.S_ISREG(mode)
             and not stat.S_ISDIR(mode)
+            and not stat.S_ISLNK(mode)
             and not policy.allow_special_files
         ):
             violations.append(
@@ -1957,10 +1995,12 @@ class ZipFile:
             targetpath = os.fspath(target_override)
 
         upperdirs = os.path.dirname(targetpath)
-        if upperdirs and not os.path.exists(upperdirs):
-            os.makedirs(upperdirs, exist_ok=True)
+        if upperdirs:
+            self._secure_mkdirs(upperdirs)
 
         if member.is_dir():
+            if os.path.lexists(targetpath) and os.path.islink(targetpath):
+                raise ValueError("Refusing to traverse symlinked extraction directory")
             if not os.path.isdir(targetpath):
                 try:
                     os.mkdir(targetpath)
@@ -1969,19 +2009,70 @@ class ZipFile:
                         raise
             return targetpath
 
-        with self.open(member, pwd=pwd) as source, open(targetpath, "wb") as target:
-            if quota_member_limit is None and quota_total_limit is None:
-                shutil.copyfileobj(source, target)
-            else:
-                quota_target = _ExtractionQuotaWriter(
-                    target,
-                    member_limit=quota_member_limit,
-                    total_limit=quota_total_limit,
-                    total_written=quota_total_written,
-                )
-                shutil.copyfileobj(source, quota_target)
+        mode = (member.external_attr >> 16) & 0o170000
+        if stat.S_ISLNK(mode):
+            with self.open(member, pwd=pwd) as source:
+                link_target = os.fsdecode(source.read())
+            if os.path.isabs(link_target) or ".." in link_target.replace(
+                "\\", "/"
+            ).split("/"):
+                raise ValueError("Refusing to create symlink outside extraction root")
+            if os.path.lexists(targetpath):
+                os.unlink(targetpath)
+            os.symlink(link_target, targetpath)
+            return targetpath
+        if mode and not stat.S_ISREG(mode) and not stat.S_ISDIR(mode):
+            if stat.S_ISFIFO(mode) and hasattr(os, "mkfifo"):
+                if os.path.lexists(targetpath):
+                    os.unlink(targetpath)
+                os.mkfifo(targetpath, stat.S_IMODE(member.external_attr >> 16))
+                return targetpath
+            raise ValueError("Unsupported special file type")
+
+        temp_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=upperdirs or ".", prefix=".ziplet-", delete=False
+            ) as target:
+                temp_name = target.name
+                if quota_member_limit is None and quota_total_limit is None:
+                    with self.open(member, pwd=pwd) as source:
+                        shutil.copyfileobj(source, target)
+                else:
+                    with self.open(member, pwd=pwd) as source:
+                        quota_target = _ExtractionQuotaWriter(
+                            target,
+                            member_limit=quota_member_limit,
+                            total_limit=quota_total_limit,
+                            total_written=quota_total_written,
+                        )
+                        shutil.copyfileobj(source, quota_target)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(temp_name, targetpath)
+            temp_name = None
+        finally:
+            if temp_name is not None:
+                try:
+                    os.unlink(temp_name)
+                except FileNotFoundError:
+                    pass
 
         return targetpath
+
+    @staticmethod
+    def _secure_mkdirs(path: str) -> None:
+        """Create parents without following pre-existing symlink components."""
+        current = os.path.abspath(os.sep if os.path.isabs(path) else ".")
+        for component in os.path.normpath(path).split(os.path.sep):
+            if not component:
+                continue
+            current = os.path.join(current, component)
+            if os.path.lexists(current):
+                if os.path.islink(current) or not os.path.isdir(current):
+                    raise ValueError("Refusing to traverse unsafe extraction path")
+            else:
+                os.mkdir(current)
 
     def _writecheck(self, zinfo: ZipInfo) -> None:
         """Validate that *zinfo* can be written to the archive.
@@ -2212,11 +2303,16 @@ class ZipFile:
             return
 
         if self._writing:
-            raise ValueError(
-                "Can't close the ZIP file while there is "
-                "an open writing handle on it. "
-                "Close the writing handle before closing the zip."
-            )
+            with self._write_condition:
+                writer = self._active_writer
+                if writer is not None and writer._state == WriteState.FINALIZING:
+                    self._write_condition.wait_for(lambda: not self._writing)
+                if self._writing:
+                    raise ValueError(
+                        "Can't close the ZIP file while there is "
+                        "an open writing handle on it. "
+                        "Close the writing handle before closing the zip."
+                    )
 
         try:
             if self.mode in ("w", "x", "a") and self._didModify:

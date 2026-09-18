@@ -114,3 +114,10 @@ def test_open_existing_zipfile_object_reuses_password(tmp_path: FsPath) -> None:
         assert (path / "data" / "secret.bin").read_bytes() == b"\x01\x02\x03"
     finally:
         zf.close()
+
+
+def test_missing_path_is_not_a_symlink(tmp_path: FsPath) -> None:
+    archive = tmp_path / "missing.zip"
+    with ziplet.ZipFile(archive, "w") as zf:
+        zf.writestr("present.txt", b"payload")
+    assert not (Path(archive) / "missing.txt").is_symlink()

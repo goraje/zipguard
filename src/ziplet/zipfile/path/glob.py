@@ -49,7 +49,8 @@ class Translator:
         Wraps the pattern in a non-capturing, ``DOTALL`` group so that ``.``
         matches newlines, and anchors it for a full match.
         """
-        return rf"(?s:{pattern})\z"
+        # ``\z`` is only available on Python 3.14; ``\Z`` is portable.
+        return rf"(?s:{pattern})\Z"
 
     def match_dirs(self, pattern: str) -> str:
         """Allow *pattern* to also match archive directory entries.

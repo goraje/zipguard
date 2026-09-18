@@ -418,6 +418,8 @@ class Path:
 
     def is_symlink(self) -> bool:
         """Return whether this path is a symlink."""
+        if not self.exists():
+            return False
         info = self.root.getinfo(self.at)
         mode = info.external_attr >> 16
         return stat.S_ISLNK(mode)

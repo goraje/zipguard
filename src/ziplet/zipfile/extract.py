@@ -62,8 +62,6 @@ class ExtractPolicy:
     require_utf8_names: bool = True
     reject_duplicate_targets: bool = True
     on_violation: ViolationAction = ViolationAction.ERROR
-    check_mtime: bool = False
-    check_owner: bool = False
     preview_only: bool = False
     custom_validator: Callable[["ZipInfo", Path], None] | None = None
 

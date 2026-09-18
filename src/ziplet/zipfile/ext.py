@@ -206,8 +206,12 @@ class ZipExtFile(io.BufferedIOBase):
                 self._zinfo
             )
             self.encryption_header = self._fileobj.read(encryption_header_length)
+            if len(self.encryption_header) != encryption_header_length:
+                raise BadZipFile("Truncated AES encryption header")
             self._orig_compress_left -= encryption_header_length
             self._orig_compress_left -= AesZipDecrypter.hmac_size
+            if self._orig_compress_left < 0:
+                raise BadZipFile("AES entry is shorter than its encryption overhead")
             return AesZipDecrypter
         else:
             if not self._pwd:
@@ -217,7 +221,16 @@ class ZipExtFile(io.BufferedIOBase):
             self.encryption_header = self._fileobj.read(
                 ZipCryptoDecrypter.encryption_header_length
             )
+            if (
+                len(self.encryption_header)
+                != ZipCryptoDecrypter.encryption_header_length
+            ):
+                raise BadZipFile("Truncated ZipCrypto encryption header")
             self._orig_compress_left -= ZipCryptoDecrypter.encryption_header_length
+            if self._orig_compress_left < 0:
+                raise BadZipFile(
+                    "ZipCrypto entry is shorter than its encryption header"
+                )
             return ZipCryptoDecrypter
 
     def get_decrypter_kwargs(self) -> dict[str, Any]:
@@ -561,10 +574,20 @@ class ZipExtFile(io.BufferedIOBase):
             # truncate split-output reads and produce false CRC failures.
             self._eof = self._decompressor.eof
 
-        data = data[: self._left]
+        if len(data) > self._left:
+            raise BadZipFile(
+                f"More data found than indicated by uncompressed size for '{self.name}'"
+            )
         self._left -= len(data)
-        if self._left <= 0:
+        if self._compress_type == ZIP_STORED and self._left <= 0:
             self._eof = True
+        elif (
+            self._compress_type != ZIP_STORED
+            and self._compress_left <= 0
+            and not self._eof
+            and not data
+        ):
+            raise BadZipFile(f"Truncated compressed stream for '{self.name}'")
         self._update_crc(data)
         if self._eof:
             self.check_integrity()

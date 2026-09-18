@@ -14,6 +14,7 @@ import os
 from typing import TYPE_CHECKING
 
 from ziplet.cryptography.base import BaseZipDecrypter, BaseZipEncryptor
+from ziplet.exceptions import BadZipFile
 from ziplet.zipfile.shared import MASK_USE_DATA_DESCRIPTOR
 
 if TYPE_CHECKING:
@@ -75,6 +76,8 @@ class ZipCryptoDecrypter(BaseZipDecrypter):
             RuntimeError: If *pwd* does not match the check byte in
                 *encryption_header*.
         """
+        if len(encryption_header) != self.encryption_header_length:
+            raise BadZipFile("Truncated ZipCrypto encryption header")
         self.key0 = 305419896
         self.key1 = 591751049
         self.key2 = 878082192

@@ -158,6 +158,11 @@ class _Extra:
         # use memoryview for zero-copy slices
         rest: bytes | memoryview = memoryview(data)
         while rest:
+            if len(rest) < 4:
+                raise BadZipFile("Corrupt extra field header")
+            _, field_length = cls.FIELD_STRUCT.unpack(rest[:4])
+            if len(rest) < 4 + field_length:
+                raise BadZipFile("Corrupt extra field data")
             extra, rest = cls.read_one(rest)
             yield extra
 
@@ -878,6 +883,12 @@ class ZipInfo:
             self.aes_extra.wz_aes_strength,
             self.compress_type,
         ) = struct.unpack("<H2sBH", extra[4 : ln + 4])
+        if self.aes_extra.wz_aes_version not in (1, 2):
+            raise BadZipFile("Unsupported WinZip AES version")
+        if self.aes_extra.wz_aes_vendor_id != b"AE":
+            raise BadZipFile("Invalid WinZip AES vendor ID")
+        if self.aes_extra.wz_aes_strength not in (1, 2, 3):
+            raise BadZipFile("Invalid WinZip AES strength")
 
     def _decodeExtra(self, filename_crc: int) -> None:
         """Parse the extra-data block and update ``self`` with decoded field values.
@@ -928,6 +939,8 @@ class ZipInfo:
                 except KeyError:
                     pass  # Unknown extra field — skip
             extra = extra[ln + 4 :]
+        if extra:
+            raise BadZipFile("Corrupt trailing extra field data")
 
     @classmethod
     def from_file(
@@ -967,8 +980,10 @@ class ZipInfo:
         elif isinstance(arcname, os.PathLike):
             arcname = os.fspath(arcname)
         arcname = os.path.normpath(os.path.splitdrive(arcname)[1])
-        while arcname[0] in (os.sep, os.altsep):
+        while arcname and arcname[0] in (os.sep, os.altsep):
             arcname = arcname[1:]
+        if not arcname:
+            raise ValueError("Archive name must not be empty")
         if isdir:
             arcname += "/"
         zinfo = cls(arcname, date_time)

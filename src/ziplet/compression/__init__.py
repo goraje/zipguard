@@ -77,6 +77,8 @@ class Registry:
                 )
 
     def register(self, method: int, entry: CompressionEntry) -> None:
+        if method != entry.compression_method:
+            raise ValueError("Registry key does not match compression method")
         self._registry[method] = entry
 
     def check_compression(self, compression: int) -> None:

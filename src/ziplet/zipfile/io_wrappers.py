@@ -158,6 +158,8 @@ class Tellable:
             The number of bytes written.
         """
         n = self.fp.write(data)
+        if n != len(data):
+            raise io.BlockingIOError(0, "short write", len(data) - n)
         self.offset += n
         return n
 

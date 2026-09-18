@@ -96,6 +96,8 @@ class TestZipWriteFile:
             match="File size unexpectedly exceeded ZIP64 limit",
         ):
             zwf.close()
+        assert parent._writing is False
+        assert zwf._state.value == "failed"
 
     def test_non_zip64_compress_size_over_limit_raises(
         self,
@@ -128,3 +130,23 @@ class TestZipWriteFile:
             zwf.write(b"abc")
 
         assert parent.start_dir > 0
+
+    def test_finalization_failure_clears_parent_write_state(self) -> None:
+        parent = _make_parent()
+        zinfo = _make_zinfo("failed.txt")
+        zwf = ZipWriteFile(
+            cast(Any, parent),
+            zinfo,
+            zip64=False,
+            encryptor=cast(Any, _FakeEncryptor(flush_tail=b"x" * 20)),
+        )
+        write_module = cast(Any, write_mod)
+        original = write_module.ZIP64_LIMIT
+        write_module.ZIP64_LIMIT = 1
+        try:
+            with pytest.raises(RuntimeError):
+                zwf.close()
+        finally:
+            write_module.ZIP64_LIMIT = original
+        assert parent._writing is False
+        assert zinfo not in parent.filelist

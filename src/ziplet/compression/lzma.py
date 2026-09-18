@@ -58,6 +58,8 @@ try:
         lc = props_byte % 9
         lp = (props_byte // 9) % 5
         pb = props_byte // 45
+        if lc > 8 or lp > 4 or pb > 4 or lc + lp > 4:
+            raise BadZipFile("Invalid LZMA properties")
         (dict_size,) = struct.unpack("<I", props[1:5])
         if dict_size > _MAX_LZMA_DICT_SIZE:
             raise BadZipFile(
@@ -194,7 +196,11 @@ try:
                 self._unconsumed += data
                 if len(self._unconsumed) < 4:
                     return b""
+                if self._unconsumed[:2] != b"\x09\x04":
+                    raise BadZipFile("Invalid ZIP LZMA header")
                 (psize,) = struct.unpack("<H", self._unconsumed[2:4])
+                if psize != 5:
+                    raise BadZipFile("Invalid ZIP LZMA properties size")
                 if len(self._unconsumed) < 4 + psize:
                     return b""
                 self._decomp = lzma.LZMADecompressor(

@@ -6,6 +6,7 @@ AES in CTR mode with a little-endian counter, and HMAC-SHA1 authentication.
 
 from __future__ import annotations
 
+import hmac as stdlib_hmac
 import os
 from typing import TYPE_CHECKING
 
@@ -179,8 +180,13 @@ class AesZipDecrypter(BaseZipDecrypter):
         if zinfo.aes_extra.wz_aes_strength is None:
             raise BadZipFile("Missing AES strength for file %r" % zinfo.filename)
 
-        key_length = _WZ_KEY_LENGTHS[zinfo.aes_extra.wz_aes_strength]
-        salt_length = _WZ_SALT_LENGTHS[zinfo.aes_extra.wz_aes_strength]
+        try:
+            key_length = _WZ_KEY_LENGTHS[zinfo.aes_extra.wz_aes_strength]
+            salt_length = _WZ_SALT_LENGTHS[zinfo.aes_extra.wz_aes_strength]
+        except KeyError:
+            raise BadZipFile("Invalid AES strength") from None
+        if len(encryption_header) != salt_length + _PWD_VERIFY_LENGTH:
+            raise BadZipFile("Truncated AES encryption header")
 
         salt = encryption_header[:salt_length]
         pwd_verify = encryption_header[salt_length : salt_length + _PWD_VERIFY_LENGTH]
@@ -194,7 +200,7 @@ class AesZipDecrypter(BaseZipDecrypter):
         )
         keymaterial = kdf.derive(pwd)
 
-        if keymaterial[2 * key_length :] != pwd_verify:
+        if not stdlib_hmac.compare_digest(keymaterial[2 * key_length :], pwd_verify):
             raise RuntimeError("Bad password for file %r" % zinfo.filename)
 
         self.decrypter = _AesCtrWithLittleEndian(keymaterial[:key_length])
@@ -218,7 +224,12 @@ class AesZipDecrypter(BaseZipDecrypter):
         """
         if zinfo.aes_extra.wz_aes_strength is None:
             raise BadZipFile("Missing AES strength for file %r" % zinfo.filename)
-        return _WZ_SALT_LENGTHS[zinfo.aes_extra.wz_aes_strength] + _PWD_VERIFY_LENGTH
+        try:
+            return (
+                _WZ_SALT_LENGTHS[zinfo.aes_extra.wz_aes_strength] + _PWD_VERIFY_LENGTH
+            )
+        except KeyError:
+            raise BadZipFile("Invalid AES strength") from None
 
     def decrypt(self, data: bytes) -> bytes:
         """Decrypt a chunk of ciphertext and update the running HMAC.
@@ -242,8 +253,12 @@ class AesZipDecrypter(BaseZipDecrypter):
         Raises:
             BadZipFile: If the computed HMAC does not match *hmac_check*.
         """
+        if len(hmac_check) != self.hmac_size:
+            raise BadZipFile("Truncated HMAC check for file %r" % self.filename)
         hmac_copy = self.hmac.copy()
-        if hmac_copy.finalize()[: self.hmac_size] != hmac_check:
+        if not stdlib_hmac.compare_digest(
+            hmac_copy.finalize()[: self.hmac_size], hmac_check
+        ):
             raise BadZipFile("Bad HMAC check for file %r" % self.filename)
 
 

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import binascii
 import io
-from typing import IO, TYPE_CHECKING
+from enum import Enum
+from typing import IO, TYPE_CHECKING, cast
 
 try:
     import zlib
@@ -26,6 +27,14 @@ from ziplet.zipfile.info import ZipInfo
 from ziplet.zipfile.shared import ZIP64_LIMIT
 
 __all__ = ["ZipWriteFile"]
+
+
+class WriteState(str, Enum):
+    ACTIVE = "active"
+    FINALIZING = "finalizing"
+    COMMITTED = "committed"
+    FAILED = "failed"
+    CLOSED = "closed"
 
 
 class ZipWriteFile(io.BufferedIOBase):
@@ -69,6 +78,8 @@ class ZipWriteFile(io.BufferedIOBase):
         self._file_size: int = 0
         self._compress_size: int = 0
         self._crc: int = 0
+        self._state = WriteState.ACTIVE
+        self._error: BaseException | None = None
 
         if self._encryptor is not None:
             self._encryptor.update_zipinfo(self._zinfo)
@@ -108,7 +119,7 @@ class ZipWriteFile(io.BufferedIOBase):
         # From this point onwards, we have modified the archive.
         self._zipfile._didModify = True
         self._zipfile._writing = True
-        self._fileobj.write(header)
+        _write_all(self._fileobj, header)
 
     def _write_encryption_header(self) -> None:
         """Request the encryption header from the encryptor and write it.
@@ -119,7 +130,7 @@ class ZipWriteFile(io.BufferedIOBase):
         assert self._encryptor is not None
         buf = self._encryptor.encryption_header()
         self._compress_size += len(buf)
-        self._fileobj.write(buf)
+        _write_all(self._fileobj, buf)
 
     def write(self, data: ReadableBuffer, /) -> int:
         """Write *data* to the ZIP entry, compressing and encrypting as needed.
@@ -173,47 +184,78 @@ class ZipWriteFile(io.BufferedIOBase):
             RuntimeError: If a non-ZIP64 entry exceeds the 4 GiB ZIP64 limit
                 for either the uncompressed or compressed size.
         """
-        if self.closed:
+        condition = getattr(self._zipfile, "_write_condition", None)
+        if condition is not None:
+            with condition:
+                if self._state in (WriteState.COMMITTED, WriteState.CLOSED):
+                    return
+                if self._state == WriteState.FAILED:
+                    assert self._error is not None
+                    raise self._error
+                if self._state == WriteState.FINALIZING:
+                    condition.wait_for(
+                        lambda: self._state in (WriteState.COMMITTED, WriteState.FAILED)
+                    )
+                    state = cast(WriteState, self._state)
+                    if state == WriteState.FAILED:
+                        assert self._error is not None
+                        raise self._error
+                    return
+                self._state = WriteState.FINALIZING
+        elif self.closed:
             return
-        super().close()
-        # Flush any data from the compressor
-        if self._compressor:
-            buf = self._compressor.flush()
-        else:
-            buf = b""
-        if self._encryptor:
-            buf = self._encryptor.encrypt(buf)
-            buf += self._encryptor.flush()
-        self._compress_size += len(buf)
-        self._fileobj.write(buf)
+        try:
+            # Flush any data from the compressor.
+            buf = self._compressor.flush() if self._compressor else b""
+            if self._encryptor:
+                buf = self._encryptor.encrypt(buf)
+                buf += self._encryptor.flush()
+            self._compress_size += len(buf)
+            _write_all(self._fileobj, buf)
 
-        self._zinfo.compress_size = self._compress_size
-        self._zinfo.CRC = self._crc
-        self._zinfo.file_size = self._file_size
+            self._zinfo.compress_size = self._compress_size
+            self._zinfo.CRC = self._crc
+            self._zinfo.file_size = self._file_size
 
-        if not self._zip64:
-            if self._file_size > ZIP64_LIMIT:
-                raise RuntimeError("File size unexpectedly exceeded ZIP64 limit")
-            if self._compress_size > ZIP64_LIMIT:
-                raise RuntimeError("Compressed size unexpectedly exceeded ZIP64 limit")
+            if not self._zip64:
+                if self._file_size > ZIP64_LIMIT:
+                    raise RuntimeError("File size unexpectedly exceeded ZIP64 limit")
+                if self._compress_size > ZIP64_LIMIT:
+                    raise RuntimeError(
+                        "Compressed size unexpectedly exceeded ZIP64 limit"
+                    )
 
-        # Write updated header info
-        if self._zinfo.use_datadescripter:
-            # Write CRC and file sizes after the file data
-            self._fileobj.write(self._zinfo.datadescripter(self._zip64))
-            self._zipfile.start_dir = self._fileobj.tell()
-        else:
-            # Seek backwards and write file header (which will now include
-            # correct CRC and file sizes)
+            if self._zinfo.use_datadescripter:
+                _write_all(self._fileobj, self._zinfo.datadescripter(self._zip64))
+                self._zipfile.start_dir = self._fileobj.tell()
+            else:
+                self._zipfile.start_dir = self._fileobj.tell()
+                self._fileobj.seek(self._zinfo.header_offset)
+                _write_all(self._fileobj, self._zinfo.FileHeader(self._zip64))
+                self._fileobj.seek(self._zipfile.start_dir)
 
-            # Preserve current position in file
-            self._zipfile.start_dir = self._fileobj.tell()
-            self._fileobj.seek(self._zinfo.header_offset)
-            self._fileobj.write(self._zinfo.FileHeader(self._zip64))
-            self._fileobj.seek(self._zipfile.start_dir)
+            self._zipfile.filelist.append(self._zinfo)
+            self._zipfile.NameToInfo[self._zinfo.filename] = self._zinfo
+            self._state = WriteState.COMMITTED
+        except BaseException as exc:
+            self._error = exc
+            self._state = WriteState.FAILED
+            raise
+        finally:
+            self._zipfile._writing = False
+            condition = getattr(self._zipfile, "_write_condition", None)
+            if condition is not None:
+                with condition:
+                    self._zipfile._active_writer = None
+                    condition.notify_all()
+            super().close()
 
-        self._zipfile._writing = False
 
-        # Successfully written: Add file to our caches
-        self._zipfile.filelist.append(self._zinfo)
-        self._zipfile.NameToInfo[self._zinfo.filename] = self._zinfo
+def _write_all(fileobj: IO[bytes], data: bytes) -> None:
+    """Write all bytes or fail instead of silently truncating a ZIP record."""
+    view = memoryview(data)
+    while view:
+        written = fileobj.write(view)
+        if written is None or written <= 0:
+            raise io.BlockingIOError(0, "short write", len(view))
+        view = view[written:]

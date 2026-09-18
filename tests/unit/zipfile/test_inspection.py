@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 import ziplet
 from ziplet.zipfile.info import ZipInfo
 
@@ -10,7 +12,8 @@ def test_inspection_reports_metadata_findings_without_extraction(
     archive = tmp_path / "inspect.zip"
     with ziplet.ZipFile(archive, "w") as zf:
         zf.writestr("same.txt", b"one")
-        zf.writestr("same.txt", b"two")
+        with pytest.warns(UserWarning, match="Duplicate name: 'same.txt'"):
+            zf.writestr("same.txt", b"two")
         zf.writestr("../same.txt", b"escape")
         zf.writestr("large.bin", b"x" * 8)
 
