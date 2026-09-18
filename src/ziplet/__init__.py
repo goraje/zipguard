@@ -6,7 +6,23 @@ from ziplet.compression import (
     ZIP_ZSTANDARD,
 )
 from ziplet.cryptography import WZ_AES, WZ_AES_V1, WZ_AES_V2, ZIP_CRYPTO
-from ziplet.zipfile.file import ZipFile, ZipFileExtra, is_zipfile
+from ziplet.zipfile.extract import (
+    ExtractionError,
+    ExtractMemberResult,
+    ExtractPolicy,
+    ExtractResult,
+    ExtractViolation,
+    MemberStatus,
+    OverwritePolicy,
+    ViolationAction,
+)
+from ziplet.zipfile.file import (
+    INHERIT_ENCRYPTION,
+    EncryptionOverride,
+    ZipFile,
+    ZipFileExtra,
+    is_zipfile,
+)
 from ziplet.zipfile.info import WzAesExtra
 
 __all__ = [
@@ -23,4 +39,14 @@ __all__ = [
     "ZIP_ZSTANDARD",
     "ZipFile",
     "is_zipfile",
+    "INHERIT_ENCRYPTION",
+    "EncryptionOverride",
+    "ExtractMemberResult",
+    "ExtractPolicy",
+    "ExtractResult",
+    "ExtractViolation",
+    "ExtractionError",
+    "MemberStatus",
+    "OverwritePolicy",
+    "ViolationAction",
 ]

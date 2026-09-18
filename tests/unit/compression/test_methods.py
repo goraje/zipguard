@@ -51,7 +51,7 @@ class TestCompressionMethodConstants:
 class TestCompressorBase:
     def test_cannot_instantiate_directly(self) -> None:
         with pytest.raises(TypeError):
-            CompressorBase()  # type: ignore[abstract]
+            CompressorBase()  # type: ignore[abstract]  # ty: ignore[call-non-callable]
 
     def test_concrete_subclass_requires_compress_and_flush(self) -> None:
         class _Incomplete(CompressorBase):
@@ -59,7 +59,7 @@ class TestCompressorBase:
                 return data
 
         with pytest.raises(TypeError):
-            _Incomplete()  # type: ignore[abstract]
+            _Incomplete()  # type: ignore[abstract]  # ty: ignore[call-non-callable]
 
     def test_concrete_subclass_works(self) -> None:
         class _Passthrough(CompressorBase):
@@ -77,7 +77,7 @@ class TestCompressorBase:
 class TestDecompressorBase:
     def test_cannot_instantiate_directly(self) -> None:
         with pytest.raises(TypeError):
-            DecompressorBase()  # type: ignore[abstract]
+            DecompressorBase()  # type: ignore[abstract]  # ty: ignore[call-non-callable]
 
     def test_concrete_subclass_requires_eof_and_decompress(self) -> None:
         class _Incomplete(DecompressorBase):
@@ -86,7 +86,7 @@ class TestDecompressorBase:
                 return False
 
         with pytest.raises(TypeError):
-            _Incomplete()  # type: ignore[abstract]
+            _Incomplete()  # type: ignore[abstract]  # ty: ignore[call-non-callable]
 
     def test_concrete_subclass_works(self) -> None:
         class _Passthrough(DecompressorBase):
@@ -108,7 +108,7 @@ class TestStreamingDecompressor:
 
     def test_cannot_instantiate_directly(self) -> None:
         with pytest.raises(TypeError):
-            StreamingDecompressor()  # type: ignore[abstract]
+            StreamingDecompressor()  # type: ignore[abstract]  # ty: ignore[call-non-callable]
 
     def test_concrete_subclass_works(self) -> None:
         class _PassthroughStreaming(StreamingDecompressor):

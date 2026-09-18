@@ -8,14 +8,14 @@ from ziplet.cryptography.base import BaseZipDecrypter, BaseZipEncryptor
 class TestBaseZipDecrypter:
     def test_cannot_instantiate_directly(self) -> None:
         with pytest.raises(TypeError):
-            BaseZipDecrypter()  # type: ignore[abstract]
+            BaseZipDecrypter()  # type: ignore[abstract]  # ty: ignore[call-non-callable]
 
     def test_subclass_missing_decrypt_cannot_instantiate(self) -> None:
         class Incomplete(BaseZipDecrypter):
             pass
 
         with pytest.raises(TypeError):
-            Incomplete()  # type: ignore[abstract]
+            Incomplete()  # type: ignore[abstract]  # ty: ignore[call-non-callable]
 
     def test_concrete_subclass_can_instantiate(self) -> None:
         class Concrete(BaseZipDecrypter):
@@ -36,7 +36,7 @@ class TestBaseZipDecrypter:
 class TestBaseZipEncryptor:
     def test_cannot_instantiate_directly(self) -> None:
         with pytest.raises(TypeError):
-            BaseZipEncryptor()  # type: ignore[abstract]
+            BaseZipEncryptor()  # type: ignore[abstract]  # ty: ignore[call-non-callable]
 
     def test_subclass_missing_encrypt_cannot_instantiate(self) -> None:
         class Incomplete(BaseZipEncryptor):
@@ -50,7 +50,7 @@ class TestBaseZipEncryptor:
                 return b""
 
         with pytest.raises(TypeError):
-            Incomplete()  # type: ignore[abstract]
+            Incomplete()  # type: ignore[abstract]  # ty: ignore[call-non-callable]
 
     def test_subclass_missing_update_zipinfo_cannot_instantiate(self) -> None:
         class Incomplete(BaseZipEncryptor):
@@ -64,7 +64,7 @@ class TestBaseZipEncryptor:
                 return b""
 
         with pytest.raises(TypeError):
-            Incomplete()  # type: ignore[abstract]
+            Incomplete()  # type: ignore[abstract]  # ty: ignore[call-non-callable]
 
     def test_subclass_missing_flush_cannot_instantiate(self) -> None:
         class Incomplete(BaseZipEncryptor):
@@ -78,7 +78,7 @@ class TestBaseZipEncryptor:
                 return b""
 
         with pytest.raises(TypeError):
-            Incomplete()  # type: ignore[abstract]
+            Incomplete()  # type: ignore[abstract]  # ty: ignore[call-non-callable]
 
     def test_concrete_subclass_can_instantiate(self) -> None:
         class Concrete(BaseZipEncryptor):

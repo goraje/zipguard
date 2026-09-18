@@ -7,10 +7,10 @@ from typing import Any, cast
 import pytest
 
 import ziplet
-from ziplet.compression import lzma
+from ziplet.compression import lzma, registry
 from ziplet.exceptions import BadZipFile
 from ziplet.zipfile.ext import ZipExtFile
-from ziplet.zipfile.file import ZipFileExtra, registry
+from ziplet.zipfile.file import ZipFileExtra
 from ziplet.zipfile.info import ZipInfo
 from ziplet.zipfile.shared import (
     sizeCentralDir,
@@ -101,7 +101,7 @@ def _find_aes_metadata(archive: bytes) -> tuple[int, int, int, int]:
     def version(extra: bytes) -> int:
         marker = struct.pack("<HH", 0x9901, 7)
         start = extra.index(marker) + 4
-        return struct.unpack("<H", extra[start : start + 2])[0]
+        return int(struct.unpack("<H", extra[start : start + 2])[0])
 
     return local[7], central[9], version(local_extra), version(central_extra)
 

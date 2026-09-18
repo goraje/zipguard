@@ -193,12 +193,71 @@ with ZipFile(buffer, "r") as zf:
     data = zf.read("data.txt")
 ```
 
+### Per-entry encryption
+
+Archive-level encryption remains the default for newly written members, but
+individual entries can override it. Use `INHERIT_ENCRYPTION` to make
+inheritance explicit, `None` for a plaintext member, or an encryption method
+for a protected member.
+
+```python
+from ziplet import INHERIT_ENCRYPTION, ZIP_CRYPTO, WZ_AES
+
+with ZipFile("mixed.zip", "w", encryption=WZ_AES) as zf:
+    zf.setpassword(b"default-password")
+    zf.writestr("secret.txt", b"secret")
+    zf.writestr("public.txt", b"public", encryption=None)
+    zf.writestr(
+        "legacy.txt",
+        b"legacy",
+        encryption=ZIP_CRYPTO,
+        password=b"legacy-password",
+    )
+    zf.writestr("inherited.txt", b"inherited", encryption=INHERIT_ENCRYPTION)
+```
+
+An entry-level password overrides the archive default password. Per-entry
+encryption is part of the ZIP format, but consumers vary in their support for
+mixed algorithms or multiple passwords in one archive.
+
+### Opt-in extraction policy
+
+The legacy `extract()` and `extractall()` behavior remains unchanged when no
+policy is supplied. For untrusted archives, pass an `ExtractPolicy`; policy
+enabled calls return structured results describing every member.
+
+```python
+from ziplet import ExtractPolicy, ViolationAction
+
+with ZipFile("input.zip") as zf:
+    result = zf.extractall(
+        "out",
+        policy=ExtractPolicy(
+            on_violation=ViolationAction.SKIP,
+            max_compression_ratio=100.0,
+        ),
+    )
+
+for member in result.members:
+    print(member.member, member.status, member.violations)
+```
+
+`ExtractPolicy` can enforce path, overwrite, file-size, archive-size,
+entry-count, compression-ratio, extension, duplicate-target, and file-type
+limits. Set `preview_only=True` for a dry run. Policy violations configured as
+errors raise `ExtractionError`, whose `result` attribute contains the partial
+structured result. Size limits are enforced both from archive metadata before
+extraction and against actual bytes written during extraction; an actual-size
+quota breach aborts that member and removes its partial output.
+
 ## Public API
 
 The package exports these primary entry points:
 
 - `ZipFile`
 - `is_zipfile`
+- `INHERIT_ENCRYPTION`
+- `ExtractPolicy`, `ExtractResult`, `ExtractMemberResult`, `ExtractionError`
 - `ZipFileExtra`
 - `WZ_AES`, `WZ_AES_V1`, `WZ_AES_V2`
 - `ZIP_CRYPTO`
