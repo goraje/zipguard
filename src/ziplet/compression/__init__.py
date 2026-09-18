@@ -17,6 +17,8 @@ from ziplet.compression.methods import (
     CompressionEntry,
     CompressorBase,
     DecompressorBase,
+    NoopCompressor,
+    NoopDecompressor,
     StreamingDecompressor,
 )
 
@@ -31,6 +33,8 @@ __all__ = [
     "ZIP_ZSTANDARD",
     "CompressorBase",
     "DecompressorBase",
+    "NoopCompressor",
+    "NoopDecompressor",
     "StreamingDecompressor",
     "CompressionEntry",
     "Registry",
@@ -81,6 +85,12 @@ class Registry:
             raise ValueError("Registry key does not match compression method")
         self._registry[method] = entry
 
+    def copy(self) -> Registry:
+        """Return an independent registry for one archive instance."""
+        cloned = object.__new__(Registry)
+        cloned._registry = self._registry.copy()
+        return cloned
+
     def check_compression(self, compression: int) -> None:
         if compression in self._registry:
             return
@@ -93,19 +103,23 @@ class Registry:
 
     def get_compressor(
         self, compress_type: int, compresslevel: int | None = None
-    ) -> CompressorBase | None:
+    ) -> CompressorBase:
         self.check_compression(compress_type)
         entry = self._registry.get(compress_type)
-        if entry is None:
-            return None
-        return entry.compressor_factory(compresslevel)
+        assert entry is not None
+        compressor = entry.compressor_factory(compresslevel)
+        if compressor is None:
+            raise RuntimeError("Compression entry did not provide a compressor")
+        return compressor
 
-    def get_decompressor(self, compress_type: int) -> DecompressorBase | None:
+    def get_decompressor(self, compress_type: int) -> DecompressorBase:
         self.check_compression(compress_type)
         entry = self._registry.get(compress_type)
-        if entry is None:
-            return None
-        return entry.decompressor_factory()
+        assert entry is not None
+        decompressor = entry.decompressor_factory()
+        if decompressor is None:
+            raise RuntimeError("Compression entry did not provide a decompressor")
+        return decompressor
 
 
 registry = Registry()

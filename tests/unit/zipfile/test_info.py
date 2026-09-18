@@ -178,6 +178,17 @@ class TestZipInfoProperties:
         zi = ZipInfo()
         zi.flag_bits = MASK_USE_DATA_DESCRIPTOR
         assert zi.use_datadescripter
+        assert zi.use_data_descriptor
+
+    def test_data_descriptor_aliases_match_legacy_names(self) -> None:
+        zi = ZipInfo("payload.bin")
+        zi.CRC = 1
+        zi.compress_size = 2
+        zi.file_size = 3
+        assert zi.data_descriptor(False) == zi.datadescripter(False)
+        assert zi.encode_data_descriptor(False, 1, 2, 3) == zi.encode_datadescripter(
+            False, 1, 2, 3
+        )
 
     def test_compresslevel_alias_roundtrip(self) -> None:
         zi = ZipInfo()

@@ -361,9 +361,14 @@ class ZipInfo:
         return bool(self.flag_bits & MASK_STRONG_ENCRYPTION)
 
     @property
-    def use_datadescripter(self) -> bool:
+    def use_data_descriptor(self) -> bool:
         """Return ``True`` if the data descriptor flag is set."""
         return bool(self.flag_bits & MASK_USE_DATA_DESCRIPTOR)
+
+    @property
+    def use_datadescripter(self) -> bool:
+        """Compatibility alias for the historical misspelled property."""
+        return self.use_data_descriptor
 
     def get_dosdate(self) -> int:
         """Encode the date part of ``date_time`` as a DOS date word.
@@ -385,7 +390,7 @@ class ZipInfo:
         dt = self.date_time
         return dt[3] << 11 | dt[4] << 5 | (dt[5] // 2)
 
-    def encode_datadescripter(
+    def encode_data_descriptor(
         self, zip64: bool, crc: int, compress_size: int, file_size: int
     ) -> bytes:
         """Encode a data descriptor record for the given CRC and sizes.
@@ -403,7 +408,7 @@ class ZipInfo:
         fmt = "<LLQQ" if zip64 else "<LLLL"
         return struct.pack(fmt, _DD_SIGNATURE, crc, compress_size, file_size)
 
-    def datadescripter(self, zip64: bool) -> bytes:
+    def data_descriptor(self, zip64: bool) -> bytes:
         """Encode a data descriptor using this entry's stored CRC and sizes.
 
         Args:
@@ -412,9 +417,19 @@ class ZipInfo:
         Returns:
             Packed data descriptor including the ``PK\x07\x08`` signature.
         """
-        return self.encode_datadescripter(
+        return self.encode_data_descriptor(
             zip64, self.CRC, self.compress_size, self.file_size
         )
+
+    def encode_datadescripter(
+        self, zip64: bool, crc: int, compress_size: int, file_size: int
+    ) -> bytes:
+        """Compatibility alias for the historical misspelled method."""
+        return self.encode_data_descriptor(zip64, crc, compress_size, file_size)
+
+    def datadescripter(self, zip64: bool) -> bytes:
+        """Compatibility alias for the historical misspelled method."""
+        return self.data_descriptor(zip64)
 
     def zip64_local_header(
         self, zip64: bool | None, file_size: int, compress_size: int
@@ -505,6 +520,15 @@ class ZipInfo:
         existing_extra = _Extra.strip(self.extra, (_EXTRA_ZIP64,))
         extra_data = zip64_extra + existing_extra
         return extra_data, file_size, compress_size, header_offset, min_version
+
+    def minimum_version(self, zip64_version: int = 0) -> int:
+        """Return the minimum ZIP version required by this entry."""
+        versions = {
+            ZIP_BZIP2: BZIP2_VERSION,
+            ZIP_LZMA: LZMA_VERSION,
+            ZIP_ZSTANDARD: ZSTANDARD_VERSION,
+        }
+        return max(zip64_version, versions.get(self.compress_type, 0))
 
     def encode_extra(self, crc: int, compress_type: int) -> tuple[bytes, int, int]:
         """Encode the WinZip AES extra field and adjust CRC and compression type.
@@ -700,12 +724,7 @@ class ZipInfo:
             min_version,
         ) = self.zip64_central_header()
 
-        if self.compress_type == ZIP_BZIP2:
-            min_version = max(BZIP2_VERSION, min_version)
-        elif self.compress_type == ZIP_LZMA:
-            min_version = max(LZMA_VERSION, min_version)
-        elif self.compress_type == ZIP_ZSTANDARD:
-            min_version = max(ZSTANDARD_VERSION, min_version)
+        min_version = self.minimum_version(min_version)
 
         extract_version = max(min_version, self.extract_version)
         create_version = max(min_version, self.create_version)
@@ -765,19 +784,13 @@ class ZipInfo:
         )
         min_version = max(min_version, zip64_min_version)
 
-        if self.compress_type == ZIP_BZIP2:
-            min_version = max(BZIP2_VERSION, min_version)
-        elif self.compress_type == ZIP_LZMA:
-            min_version = max(LZMA_VERSION, min_version)
-        elif self.compress_type == ZIP_ZSTANDARD:
-            min_version = max(ZSTANDARD_VERSION, min_version)
+        min_version = self.minimum_version(min_version)
 
-        self.extract_version = max(min_version, self.extract_version)
-        self.create_version = max(min_version, self.create_version)
+        extract_version = max(min_version, self.extract_version)
         filename, flag_bits = self._encodeFilenameFlags()
         return self.encode_local_header(
             filename=filename,
-            extract_version=self.extract_version,
+            extract_version=extract_version,
             reserved=self.reserved,
             flag_bits=flag_bits,
             compress_type=self.compress_type,

@@ -16,6 +16,8 @@ from ziplet.compression import (
     CompressionEntry,
     CompressorBase,
     DecompressorBase,
+    NoopCompressor,
+    NoopDecompressor,
     Registry,
     bz2,
     compressor_names,
@@ -111,6 +113,12 @@ class TestRegistryCheckCompression:
 
 
 class TestRegistryRegister:
+    def test_copy_is_independent(self) -> None:
+        original = Registry()
+        copied = original.copy()
+        copied._registry.clear()
+        assert original._registry
+
     def test_register_custom_entry(self) -> None:
         r = Registry()
         mock_compressor = MagicMock(spec=CompressorBase)
@@ -144,13 +152,13 @@ class TestRegistryRegister:
 
 
 class TestRegistryGetCompressor:
-    def test_stored_returns_none(self) -> None:
+    def test_stored_returns_noop_compressor(self) -> None:
         r = Registry()
-        assert r.get_compressor(ZIP_STORED) is None
+        assert isinstance(r.get_compressor(ZIP_STORED), NoopCompressor)
 
-    def test_stored_returns_none_with_level(self) -> None:
+    def test_stored_returns_noop_compressor_with_level(self) -> None:
         r = Registry()
-        assert r.get_compressor(ZIP_STORED, compresslevel=9) is None
+        assert isinstance(r.get_compressor(ZIP_STORED, compresslevel=9), NoopCompressor)
 
     def test_deflate_returns_compressor_base(self) -> None:
         if deflate.compression_entry is None:
@@ -187,9 +195,9 @@ class TestRegistryGetCompressor:
 
 
 class TestRegistryGetDecompressor:
-    def test_stored_returns_none(self) -> None:
+    def test_stored_returns_noop_decompressor(self) -> None:
         r = Registry()
-        assert r.get_decompressor(ZIP_STORED) is None
+        assert isinstance(r.get_decompressor(ZIP_STORED), NoopDecompressor)
 
     def test_deflate_returns_decompressor_base(self) -> None:
         if deflate.compression_entry is None:

@@ -12,6 +12,7 @@ except ImportError:
     crc32 = binascii.crc32
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from typing_extensions import TypeAlias
@@ -20,6 +21,7 @@ from ziplet.compression import (
     ZIP_DEFLATED,
     ZIP_LZMA,
     ZIP_STORED,
+    Registry,
     compressor_names,
     registry,
 )
@@ -39,6 +41,15 @@ __all__ = [
 ]
 
 _ReadWriteMode: TypeAlias = Literal["r", "w"]
+
+
+@dataclass(frozen=True)
+class _EncryptionFrame:
+    """Algorithm-specific framing information for one encrypted member."""
+
+    decrypter: type[ZipCryptoDecrypter] | type[AesZipDecrypter]
+    header_length: Callable[[ZipInfo], int]
+    trailer_length: int
 
 
 class ZipExtFile(io.BufferedIOBase):
@@ -84,6 +95,7 @@ class ZipExtFile(io.BufferedIOBase):
         zipinfo: ZipInfo,
         close_fileobj: bool = False,
         pwd: bytes | None = None,
+        compression_registry: Registry = registry,
     ) -> None:
         """Initialise a :class:`ZipExtFile` for reading a single ZIP entry.
 
@@ -110,6 +122,7 @@ class ZipExtFile(io.BufferedIOBase):
         self._zinfo: ZipInfo = zipinfo
         self._close_fileobj = close_fileobj
         self._pwd = pwd
+        self._compression_registry = compression_registry
 
         self.process_local_header()
         self.raise_for_unsupported_flags()
@@ -138,6 +151,7 @@ class ZipExtFile(io.BufferedIOBase):
             pass
 
         self._decrypter_cls: Callable[..., ZipCryptoDecrypter | AesZipDecrypter] | None
+        self._encryption_frame: _EncryptionFrame | None = None
         if self._zinfo.is_encrypted:
             self._decrypter_cls = self.setup_decrypter()
         else:
@@ -168,7 +182,7 @@ class ZipExtFile(io.BufferedIOBase):
         if self._zinfo.is_strong_encryption:
             raise NotImplementedError("strong encryption (flag bit 6)")
 
-    def get_decompressor(self, compress_type: int) -> DecompressorBase | None:
+    def get_decompressor(self, compress_type: int) -> DecompressorBase:
         """Return a fresh decompressor instance for *compress_type*.
 
         Args:
@@ -179,7 +193,7 @@ class ZipExtFile(io.BufferedIOBase):
             DecompressorBase | None: A new decompressor, or ``None`` if no
             decompressor is registered for *compress_type*.
         """
-        return registry.get_decompressor(compress_type)
+        return self._compression_registry.get_decompressor(compress_type)
 
     def setup_decrypter(self) -> type[ZipCryptoDecrypter] | type[AesZipDecrypter]:
         """Read the encryption header and return the appropriate decrypter class.
@@ -196,23 +210,23 @@ class ZipExtFile(io.BufferedIOBase):
             RuntimeError: If the entry is encrypted but no password was
                 supplied.
         """
-        if self._zinfo.aes_extra.wz_aes_version is not None:
+        frame = self._encryption_frame_for_entry()
+        self._encryption_frame = frame
+        if frame.decrypter is AesZipDecrypter:
             if not self._pwd:
                 raise RuntimeError(
                     f"File {self.name!r} is encrypted with WZ_AES encryption and "
                     "requires a password."
                 )
-            encryption_header_length = AesZipDecrypter.encryption_header_length(
-                self._zinfo
-            )
+            encryption_header_length = frame.header_length(self._zinfo)
             self.encryption_header = self._fileobj.read(encryption_header_length)
             if len(self.encryption_header) != encryption_header_length:
                 raise BadZipFile("Truncated AES encryption header")
             self._orig_compress_left -= encryption_header_length
-            self._orig_compress_left -= AesZipDecrypter.hmac_size
+            self._orig_compress_left -= frame.trailer_length
             if self._orig_compress_left < 0:
                 raise BadZipFile("AES entry is shorter than its encryption overhead")
-            return AesZipDecrypter
+            return frame.decrypter
         else:
             if not self._pwd:
                 raise RuntimeError(
@@ -226,12 +240,25 @@ class ZipExtFile(io.BufferedIOBase):
                 != ZipCryptoDecrypter.encryption_header_length
             ):
                 raise BadZipFile("Truncated ZipCrypto encryption header")
-            self._orig_compress_left -= ZipCryptoDecrypter.encryption_header_length
+            self._orig_compress_left -= frame.header_length(self._zinfo)
             if self._orig_compress_left < 0:
                 raise BadZipFile(
                     "ZipCrypto entry is shorter than its encryption header"
                 )
-            return ZipCryptoDecrypter
+            return frame.decrypter
+
+    def _encryption_frame_for_entry(self) -> _EncryptionFrame:
+        if self._zinfo.aes_extra.wz_aes_version is not None:
+            return _EncryptionFrame(
+                AesZipDecrypter,
+                AesZipDecrypter.encryption_header_length,
+                AesZipDecrypter.authentication_trailer_length,
+            )
+        return _EncryptionFrame(
+            ZipCryptoDecrypter,
+            lambda _info: ZipCryptoDecrypter.encryption_header_length,
+            ZipCryptoDecrypter.authentication_trailer_length,
+        )
 
     def get_decrypter_kwargs(self) -> dict[str, Any]:
         """Return keyword arguments for the decrypter constructor.
@@ -278,7 +305,7 @@ class ZipExtFile(io.BufferedIOBase):
         self._decrypter: ZipCryptoDecrypter | AesZipDecrypter | None = (
             self.get_decrypter()
         )
-        self._decompressor: DecompressorBase | None = self.get_decompressor(
+        self._decompressor: DecompressorBase = self.get_decompressor(
             self._compress_type
         )
 

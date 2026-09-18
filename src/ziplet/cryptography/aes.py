@@ -151,6 +151,7 @@ class AesZipDecrypter(BaseZipDecrypter):
     """
 
     hmac_size: int = 10
+    authentication_trailer_length: int = hmac_size
 
     def __init__(
         self,

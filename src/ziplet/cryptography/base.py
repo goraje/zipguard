@@ -26,6 +26,8 @@ class BaseZipDecrypter(ABC):
     logic for a specific algorithm.
     """
 
+    authentication_trailer_length: int = 0
+
     @abstractmethod
     def decrypt(self, data: bytes) -> bytes:
         """Decrypt a chunk of ciphertext.

@@ -15,7 +15,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import TracebackType
-from typing import IO, TYPE_CHECKING, Any, Literal, TypeAlias, cast, overload
+from typing import IO, TYPE_CHECKING, Any, Callable, Literal, TypeAlias, cast, overload
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -35,11 +35,16 @@ try:
 except ImportError:
     crc32 = binascii.crc32
 
-from ziplet.compression import ZIP_LZMA, ZIP_STORED, registry
+from ziplet.compression import ZIP_LZMA, ZIP_STORED, Registry, registry
 from ziplet.cryptography import WZ_AES, ZIP_CRYPTO
 from ziplet.cryptography.aes import AesZipEncryptor
 from ziplet.cryptography.zipcrypto import ZipCryptoEncryptor
 from ziplet.exceptions import BadZipFile, LargeZipFile
+from ziplet.zipfile.assessment import (
+    ArchiveAssessment,
+    ExtractionContext,
+    ValidationState,
+)
 from ziplet.zipfile.ext import ZipExtFile
 from ziplet.zipfile.extract import (
     ExtractionError,
@@ -47,6 +52,7 @@ from ziplet.zipfile.extract import (
     ExtractPolicy,
     ExtractResult,
     ExtractViolation,
+    MemberAssessment,
     MemberStatus,
     OverwritePolicy,
     ViolationAction,
@@ -58,6 +64,7 @@ from ziplet.zipfile.io_wrappers import (
     ClosableZipStream,
     Tellable,
 )
+from ziplet.zipfile.secure_fs import SecureExtractionRoot
 from ziplet.zipfile.shared import (
     MASK_COMPRESS_OPTION_1,
     MASK_COMPRESSED_PATCH,
@@ -85,7 +92,9 @@ from ziplet.zipfile.shared import (
     structEndArchive64Locator,
     structFileHeader,
 )
+from ziplet.zipfile.validators import ValidatorPipeline
 from ziplet.zipfile.write import WriteState, ZipWriteFile
+from ziplet.zipfile.write_coordinator import WriteCoordinator
 
 __all__ = [
     "ZipFile",
@@ -454,6 +463,28 @@ class ZipFileExtra:
 
 
 class ZipFile:
+    """Read, write, and append ZIP archives.
+
+    Supports standard ZIP compression (stored, deflate, bzip2, lzma, zstd),
+    optional WinZip AES (``WZ_AES``) and traditional ZIP encryption
+    (``ZIP_CRYPTO``), ZIP64 extensions, and archive comments.
+
+    Attributes:
+        fp: The underlying binary file object, or ``None`` when closed.
+        debug: Verbosity level for diagnostic output (0–3).
+        NameToInfo: Mapping of archive member name to its ZipInfo.
+        filelist: Ordered list of ZipInfo entries.
+        compression: Default compression method for new entries.
+        compresslevel: Default compression level for new entries.
+        mode: The mode the archive was opened with (``'r'``, ``'w'``,
+            ``'x'``, or ``'a'``).
+        pwd: Default decryption password, or ``None``.
+        encryption: Encryption scheme (``WZ_AES``, ``ZIP_CRYPTO``, or
+            ``None``).
+        metadata_encoding: Encoding used to decode non-UTF-8 filenames on
+            read. ``None`` defaults to ``'cp437'``.
+    """
+
     _HARD_EXTRACTION_VIOLATIONS = frozenset(
         {
             "absolute_path",
@@ -466,28 +497,91 @@ class ZipFile:
             "unsafe_destination",
         }
     )
-    """Read, write, and append ZIP archives.
 
-    Supports standard ZIP compression (stored, deflate, bzip2, lzma, zstd),
-    optional WinZip AES (``WZ_AES``) and traditional ZIP encryption
-    (``ZIP_CRYPTO``), ZIP64 extensions, and archive comments.
+    @staticmethod
+    def _entry_mode(info: ZipInfo) -> int:
+        return (info.external_attr >> 16) & 0o170000
 
-    Attributes:
-        fp: The underlying binary file object, or ``None`` when closed.
-        debug: Verbosity level for diagnostic output (0–3).
-        NameToInfo: Mapping of archive member name
-            to its :class:`~ziplet.zipfile.info.ZipInfo`.
-        filelist: Ordered list of :class:`~ziplet.zipfile.info.ZipInfo` entries.
-        compression: Default compression method for new entries.
-        compresslevel: Default compression level for new entries.
-        mode: The mode the archive was opened with (``'r'``, ``'w'``,
-            ``'x'``, or ``'a'``).
-        pwd: Default decryption password, or ``None``.
-        encryption: Encryption scheme (``WZ_AES``, ``ZIP_CRYPTO``, or
-            ``None``).
-        metadata_encoding: Encoding used to decode non-UTF-8 filenames on
-            read. ``None`` defaults to ``'cp437'``.
-    """
+    @classmethod
+    def _entry_type(cls, info: ZipInfo) -> tuple[bool, bool]:
+        mode = cls._entry_mode(info)
+        is_symlink = stat.S_ISLNK(mode)
+        is_special = bool(
+            mode
+            and not is_symlink
+            and not stat.S_ISREG(mode)
+            and not stat.S_ISDIR(mode)
+        )
+        return is_symlink, is_special
+
+    @classmethod
+    def _effective_violations(
+        cls,
+        violations: Iterable[ExtractViolation],
+        policy: ExtractPolicy,
+    ) -> list[ExtractViolation]:
+        return [
+            ExtractViolation(
+                violation.member,
+                violation.code,
+                violation.message,
+                ViolationAction.ERROR
+                if (
+                    violation.code in cls._HARD_EXTRACTION_VIOLATIONS
+                    and policy.on_violation == ViolationAction.WARN
+                )
+                else policy.on_violation
+                if violation.action == ViolationAction.ERROR
+                else violation.action,
+                violation.target,
+            )
+            for violation in violations
+        ]
+
+    def _assess_member(
+        self,
+        info: ZipInfo,
+        destination: Path,
+        policy_root: Path,
+        policy: ExtractPolicy,
+        targets: dict[Path, str],
+    ) -> MemberAssessment:
+        target, violations = self._evaluate_extract_member(
+            info, destination, policy_root, policy, targets
+        )
+        context = ExtractionContext(destination, policy_root, None, policy)
+        state = ValidationState()
+
+        def legacy_validator(
+            info: ZipInfo,
+            target: Path,
+            context: ExtractionContext,
+            state: ValidationState,
+        ) -> list[ExtractViolation]:
+            del info, target, context, state
+            return violations
+
+        pipeline = ValidatorPipeline([legacy_validator])
+        violations = pipeline.validate(info, target or destination, context, state)
+        return MemberAssessment(
+            info,
+            target,
+            tuple(self._effective_violations(violations, policy)),
+            *self._entry_type(info),
+        )
+
+    @classmethod
+    def _member_target_name(cls, raw_name: str) -> tuple[str, list[str]]:
+        target_name = raw_name.replace("/", os.path.sep)
+        drive, _ = os.path.splitdrive(raw_name)
+        if os.path.sep == "\\":
+            target_name = cls._sanitize_windows_name(target_name, os.path.sep)
+        parts = [
+            part
+            for part in target_name.split(os.path.sep)
+            if part not in ("", os.path.curdir, os.path.pardir)
+        ]
+        return drive, parts
 
     fp: IO[bytes] | None = None
     _windows_illegal_name_trans_table: dict[int, int] | None = None
@@ -504,6 +598,7 @@ class ZipFile:
         metadata_encoding: str | None = None,
         encryption: str | None = None,
         extra: ZipFileExtra | None = None,
+        compression_registry: Registry | None = None,
     ) -> None:
         """Open a ZIP archive for reading, writing, exclusive creation, or appending.
 
@@ -537,7 +632,10 @@ class ZipFile:
         if mode not in ("r", "w", "x", "a"):
             raise ValueError("ZipFile requires mode 'r', 'w', 'x', or 'a'")
 
-        registry.check_compression(compression)
+        selected_registry = (
+            compression_registry.copy() if compression_registry else registry.copy()
+        )
+        selected_registry.check_compression(compression)
 
         self._allowZip64 = allowZip64
         self._didModify = False
@@ -588,10 +686,12 @@ class ZipFile:
             self.filename = getattr(file, "name", None)
         self._fileRefCnt = 1
         self._lock = threading.RLock()
-        self._write_condition = threading.Condition(self._lock)
+        self._write_coordinator = WriteCoordinator(self._lock)
+        self._write_condition = self._write_coordinator.condition
         self._active_writer: ZipWriteFile | None = None
         self._seekable = True
         self._writing = False
+        self._compression_registry = selected_registry
 
         try:
             if mode == "r":
@@ -619,7 +719,7 @@ class ZipFile:
                     self.start_dir = self.fp.tell()
             else:
                 raise ValueError("Mode must be 'r', 'w', 'x', or 'a'")
-        except:
+        except BaseException:
             fp = self.fp
             self.fp = None
             assert fp is not None
@@ -849,9 +949,11 @@ class ZipFile:
         for index, info in enumerate(self.filelist):
             name_counts[info.filename] = name_counts.get(info.filename, 0) + 1
             before = set(targets)
-            target, member_violations = self._evaluate_extract_member(
+            assessment = self._assess_member(
                 info, destination, policy_root, effective_policy, targets
             )
+            target = assessment.target
+            member_violations = list(assessment.violations)
             # _evaluate_extract_member intentionally only records duplicates
             # when extraction is configured to reject them.  Inspection always
             # reports duplicate targets as an independent archive property.
@@ -885,26 +987,10 @@ class ZipFile:
                         target,
                     )
                 )
-            member_violations = [
-                ExtractViolation(
-                    violation.member,
-                    violation.code,
-                    violation.message,
-                    effective_policy.on_violation
-                    if violation.action == ViolationAction.ERROR
-                    else violation.action,
-                    violation.target,
-                )
-                for violation in member_violations
-            ]
-            mode = (info.external_attr >> 16) & 0o170000
-            is_link = stat.S_ISLNK(mode)
-            is_special = bool(
-                mode
-                and not is_link
-                and not stat.S_ISREG(mode)
-                and not stat.S_ISDIR(mode)
+            member_violations = self._effective_violations(
+                member_violations, effective_policy
             )
+            is_link, is_special = self._entry_type(info)
             ratio = (
                 None if info.compress_size == 0 else info.file_size / info.compress_size
             )
@@ -966,6 +1052,52 @@ class ZipFile:
             warnings,
             tuple(violations),
             count_over,
+        )
+
+    def assess(
+        self,
+        path: _StrPath | None = None,
+        policy: ExtractPolicy | None = None,
+    ) -> ArchiveAssessment:
+        """Return the metadata assessment shared by policy consumers."""
+        effective_policy = policy or replace(
+            ExtractPolicy(),
+            allow_overwrite=True,
+            overwrite_policy=OverwritePolicy.REPLACE,
+            max_member_size=None,
+            max_total_uncompressed_size=None,
+            max_entries=None,
+            max_compression_ratio=None,
+        )
+        destination = normalized_destination(path or os.getcwd())
+        root = normalized_destination(effective_policy.destination_root or destination)
+        targets: dict[Path, str] = {}
+        members: list[MemberAssessment] = []
+        violations: list[ExtractViolation] = []
+        names: dict[str, int] = {}
+        duplicate_targets: list[Path] = []
+        compressed = 0
+        uncompressed = 0
+        for info in self.filelist:
+            names[info.filename] = names.get(info.filename, 0) + 1
+            before = set(targets)
+            assessment = self._assess_member(
+                info, destination, root, effective_policy, targets
+            )
+            if assessment.target is not None and assessment.target in before:
+                duplicate_targets.append(assessment.target)
+            members.append(assessment)
+            violations.extend(assessment.violations)
+            compressed += info.compress_size
+            uncompressed += info.file_size
+        return ArchiveAssessment(
+            destination,
+            tuple(members),
+            tuple(violations),
+            compressed,
+            uncompressed,
+            tuple(name for name, count in names.items() if count > 1),
+            tuple(dict.fromkeys(duplicate_targets)),
         )
 
     def printdir(self, file: IO[str] | None = None) -> None:
@@ -1269,8 +1401,10 @@ class ZipFile:
             else:
                 pwd = None
 
-            return ZipExtFile(zef_file, mode, zinfo, True, pwd)
-        except:
+            return ZipExtFile(
+                zef_file, mode, zinfo, True, pwd, self._compression_registry
+            )
+        except BaseException:
             zef_file.close()
             raise
 
@@ -1309,12 +1443,7 @@ class ZipFile:
                 "force_zip64 is True, but allowZip64 was False when opening "
                 "the ZIP file."
             )
-        if self._writing:
-            raise ValueError(
-                "Can't write to the ZIP file while there is "
-                "another write handle open on it. "
-                "Close the first handle before opening another."
-            )
+        reservation = self._write_coordinator.reserve()
 
         zinfo.compress_size = 0
         zinfo.CRC = 0
@@ -1363,12 +1492,11 @@ class ZipFile:
             )
 
         try:
-            writer = ZipWriteFile(self, zinfo, zip64, encryptor)
+            writer = ZipWriteFile(
+                self, zinfo, zip64, encryptor, self._compression_registry, reservation
+            )
         except BaseException:
-            self._writing = False
-            with self._write_condition:
-                self._active_writer = None
-                self._write_condition.notify_all()
+            self._write_coordinator.release(reservation)
             raise
         self._active_writer = writer
         return writer
@@ -1516,13 +1644,11 @@ class ZipFile:
             violations.append(violation)
 
         for index, info in enumerate(infos):
-            target, member_violations = self._evaluate_extract_member(
-                info,
-                destination,
-                policy_root,
-                policy,
-                targets,
+            assessment = self._assess_member(
+                info, destination, policy_root, policy, targets
             )
+            target = assessment.target
+            member_violations = list(assessment.violations)
             if policy.max_entries is not None and index >= policy.max_entries:
                 member_violations.append(
                     ExtractViolation(
@@ -1547,24 +1673,7 @@ class ZipFile:
                         target,
                     )
                 )
-            if member_violations:
-                member_violations = [
-                    ExtractViolation(
-                        v.member,
-                        v.code,
-                        v.message,
-                        ViolationAction.ERROR
-                        if (
-                            v.code in self._HARD_EXTRACTION_VIOLATIONS
-                            and policy.on_violation == ViolationAction.WARN
-                        )
-                        else policy.on_violation
-                        if v.action == ViolationAction.ERROR
-                        else v.action,
-                        v.target,
-                    )
-                    for v in member_violations
-                ]
+            member_violations = self._effective_violations(member_violations, policy)
             violations.extend(member_violations)
 
             action = (
@@ -1628,7 +1737,7 @@ class ZipFile:
                     quota_total_limit=policy.max_total_uncompressed_size,
                     quota_total_written=total_written,
                 )
-                entry_mode = (info.external_attr >> 16) & 0o170000
+                entry_mode = self._entry_mode(info)
                 written = (
                     0
                     if info.is_dir() or stat.S_ISLNK(entry_mode) or entry_mode
@@ -1654,7 +1763,7 @@ class ZipFile:
                     )
                 )
                 continue
-            except Exception as exc:
+            except (OSError, ValueError, BadZipFile, RuntimeError) as exc:
                 violation = ExtractViolation(
                     info.filename,
                     "extraction_error",
@@ -1734,8 +1843,7 @@ class ZipFile:
         targets: dict[Path, str],
     ) -> tuple[Path | None, list[ExtractViolation]]:
         raw = info.orig_filename
-        target_name = raw.replace("/", os.path.sep)
-        drive, _ = os.path.splitdrive(raw)
+        drive, parts = self._member_target_name(raw)
         violations: list[ExtractViolation] = []
         if os.path.isabs(raw) and not policy.allow_absolute_paths:
             violations.append(
@@ -1762,11 +1870,6 @@ class ZipFile:
                     info, "parent_traversal", "parent traversal is not allowed"
                 )
             )
-        parts = [
-            part
-            for part in target_name.split(os.path.sep)
-            if part not in ("", os.path.curdir, os.path.pardir)
-        ]
         target = (destination / os.path.sep.join(parts)).resolve()
         try:
             target.relative_to(policy_root.resolve())
@@ -1884,7 +1987,7 @@ class ZipFile:
         if policy.custom_validator is not None:
             try:
                 policy.custom_validator(info, target)
-            except Exception as exc:
+            except (OSError, ValueError, BadZipFile, RuntimeError) as exc:
                 violations.append(
                     self._violation(info, "custom_validator", str(exc), target)
                 )
@@ -1973,17 +2076,8 @@ class ZipFile:
         if not isinstance(member, ZipInfo):
             member = self.getinfo(member)
 
-        arcname = member.filename.replace("/", os.path.sep)
-
-        if os.path.altsep:
-            arcname = arcname.replace(os.path.altsep, os.path.sep)
-        arcname = os.path.splitdrive(arcname)[1]
-        invalid_path_parts = ("", os.path.curdir, os.path.pardir)
-        arcname = os.path.sep.join(
-            x for x in arcname.split(os.path.sep) if x not in invalid_path_parts
-        )
-        if os.path.sep == "\\":
-            arcname = self._sanitize_windows_name(arcname, os.path.sep)
+        _, parts = self._member_target_name(member.filename)
+        arcname = os.path.sep.join(parts)
 
         if not arcname and not member.is_dir():
             raise ValueError("Empty filename.")
@@ -1998,41 +2092,79 @@ class ZipFile:
         if upperdirs:
             self._secure_mkdirs(upperdirs)
 
-        if member.is_dir():
-            if os.path.lexists(targetpath) and os.path.islink(targetpath):
-                raise ValueError("Refusing to traverse symlinked extraction directory")
-            if not os.path.isdir(targetpath):
-                try:
-                    os.mkdir(targetpath)
-                except FileExistsError:
-                    if not os.path.isdir(targetpath):
-                        raise
-            return targetpath
+        materializer = self._materializer(member)
+        return materializer(
+            member,
+            targetpath,
+            pwd,
+            quota_member_limit,
+            quota_total_limit,
+            quota_total_written,
+            upperdirs or ".",
+        )
 
-        mode = (member.external_attr >> 16) & 0o170000
+    def _materializer(self, member: ZipInfo) -> Callable[..., str]:
+        if member.is_dir():
+            return self._materialize_directory
+        mode = self._entry_mode(member)
         if stat.S_ISLNK(mode):
-            with self.open(member, pwd=pwd) as source:
-                link_target = os.fsdecode(source.read())
-            if os.path.isabs(link_target) or ".." in link_target.replace(
-                "\\", "/"
-            ).split("/"):
-                raise ValueError("Refusing to create symlink outside extraction root")
+            return self._materialize_symlink
+        if mode and not stat.S_ISREG(mode) and not stat.S_ISDIR(mode):
+            return self._materialize_special
+        return self._materialize_regular_file
+
+    def _materialize_directory(
+        self, member: ZipInfo, targetpath: str, *_args: Any
+    ) -> str:
+        if os.path.lexists(targetpath) and os.path.islink(targetpath):
+            raise ValueError("Refusing to traverse symlinked extraction directory")
+        if not os.path.isdir(targetpath):
+            try:
+                os.mkdir(targetpath)
+            except FileExistsError:
+                if not os.path.isdir(targetpath):
+                    raise
+        return targetpath
+
+    def _materialize_symlink(
+        self, member: ZipInfo, targetpath: str, pwd: bytes | None, *_args: Any
+    ) -> str:
+        with self.open(member, pwd=pwd) as source:
+            link_target = os.fsdecode(source.read())
+        if os.path.isabs(link_target) or ".." in link_target.replace("\\", "/").split(
+            "/"
+        ):
+            raise ValueError("Refusing to create symlink outside extraction root")
+        if os.path.lexists(targetpath):
+            os.unlink(targetpath)
+        os.symlink(link_target, targetpath)
+        return targetpath
+
+    def _materialize_special(
+        self, member: ZipInfo, targetpath: str, *_args: Any
+    ) -> str:
+        if stat.S_ISFIFO(self._entry_mode(member)) and hasattr(os, "mkfifo"):
             if os.path.lexists(targetpath):
                 os.unlink(targetpath)
-            os.symlink(link_target, targetpath)
+            os.mkfifo(targetpath, stat.S_IMODE(member.external_attr >> 16))
             return targetpath
-        if mode and not stat.S_ISREG(mode) and not stat.S_ISDIR(mode):
-            if stat.S_ISFIFO(mode) and hasattr(os, "mkfifo"):
-                if os.path.lexists(targetpath):
-                    os.unlink(targetpath)
-                os.mkfifo(targetpath, stat.S_IMODE(member.external_attr >> 16))
-                return targetpath
-            raise ValueError("Unsupported special file type")
+        raise ValueError("Unsupported special file type")
+
+    def _materialize_regular_file(
+        self,
+        member: ZipInfo,
+        targetpath: str,
+        pwd: bytes | None,
+        quota_member_limit: int | None,
+        quota_total_limit: int | None,
+        quota_total_written: int,
+        directory: str,
+    ) -> str:
 
         temp_name: str | None = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="wb", dir=upperdirs or ".", prefix=".ziplet-", delete=False
+                mode="wb", dir=directory, prefix=".ziplet-", delete=False
             ) as target:
                 temp_name = target.name
                 if quota_member_limit is None and quota_total_limit is None:
@@ -2063,16 +2195,11 @@ class ZipFile:
     @staticmethod
     def _secure_mkdirs(path: str) -> None:
         """Create parents without following pre-existing symlink components."""
-        current = os.path.abspath(os.sep if os.path.isabs(path) else ".")
-        for component in os.path.normpath(path).split(os.path.sep):
-            if not component:
-                continue
-            current = os.path.join(current, component)
-            if os.path.lexists(current):
-                if os.path.islink(current) or not os.path.isdir(current):
-                    raise ValueError("Refusing to traverse unsafe extraction path")
-            else:
-                os.mkdir(current)
+        absolute = Path(os.path.abspath(path))
+        root = SecureExtractionRoot(Path(absolute.anchor or os.path.sep))
+        relative = tuple(part for part in absolute.parts[1:] if part)
+        with root:
+            root.ensure_parents(relative)
 
     def _writecheck(self, zinfo: ZipInfo) -> None:
         """Validate that *zinfo* can be written to the archive.
@@ -2095,7 +2222,7 @@ class ZipFile:
             raise ValueError("write() requires mode 'w', 'x', or 'a'")
         if not self.fp:
             raise ValueError("Attempt to write ZIP archive that was already closed")
-        registry.check_compression(zinfo.compress_type)
+        self._compression_registry.check_compression(zinfo.compress_type)
         if not self._allowZip64:
             requires_zip64 = None
             if len(self.filelist) >= ZIP_FILECOUNT_LIMIT:
@@ -2134,6 +2261,7 @@ class ZipFile:
         """
         if not self.fp:
             raise ValueError("Attempt to write to ZIP archive that was already closed")
+        self._write_coordinator.ensure_readable()
         if self._writing:
             raise ValueError(
                 "Can't write to ZIP archive while an open writing handle exists"

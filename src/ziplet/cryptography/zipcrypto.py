@@ -49,6 +49,48 @@ def _gen_crc(crc: int) -> int:
 _crctable: list[int] = list(map(_gen_crc, range(256)))
 
 
+class _ZipCryptoState:
+    """Shared ZipCrypto key schedule used by encryption and decryption."""
+
+    def __init__(self, password: bytes) -> None:
+        self.key0 = 305419896
+        self.key1 = 591751049
+        self.key2 = 878082192
+        for value in password:
+            self.update_keys(value)
+
+    def crc32(self, value: int, crc: int) -> int:
+        return (crc >> 8) ^ _crctable[(crc ^ value) & 0xFF]
+
+    def update_keys(self, value: int) -> None:
+        self.key0 = self.crc32(value, self.key0)
+        self.key1 = (self.key1 + (self.key0 & 0xFF)) & 0xFFFFFFFF
+        self.key1 = (self.key1 * 134775813 + 1) & 0xFFFFFFFF
+        self.key2 = self.crc32(self.key1 >> 24, self.key2)
+
+    def decrypt(self, data: bytes) -> bytes:
+        result = bytearray()
+        for value in data:
+            key = self.key2 | 2
+            value ^= ((key * (key ^ 1)) >> 8) & 0xFF
+            self.update_keys(value)
+            result.append(value)
+        return bytes(result)
+
+    def encrypt(self, data: bytes) -> bytes:
+        result = bytearray()
+        for value in data:
+            key = self.key2 | 2
+            stream_byte = ((key * (key ^ 1)) >> 8) & 0xFF
+            self.update_keys(value)
+            result.append(value ^ stream_byte)
+        return bytes(result)
+
+
+def _state_property(name: str) -> property:
+    return property(lambda self: getattr(self._state, name))
+
+
 class ZipCryptoDecrypter(BaseZipDecrypter):
     """Decrypter for traditionally ZipCrypto-encrypted ZIP entries.
 
@@ -62,6 +104,11 @@ class ZipCryptoDecrypter(BaseZipDecrypter):
     """
 
     encryption_header_length = 12
+    authentication_trailer_length = 0
+    key0 = _state_property("key0")
+    key1 = _state_property("key1")
+    key2 = _state_property("key2")
+    crctable = _crctable
 
     def __init__(self, zinfo: ZipInfo, pwd: bytes, encryption_header: bytes) -> None:
         """Initialise the decrypter for a ZIP entry.
@@ -78,21 +125,14 @@ class ZipCryptoDecrypter(BaseZipDecrypter):
         """
         if len(encryption_header) != self.encryption_header_length:
             raise BadZipFile("Truncated ZipCrypto encryption header")
-        self.key0 = 305419896
-        self.key1 = 591751049
-        self.key2 = 878082192
-
-        self.crctable = _crctable
-
-        for p in pwd:
-            self.update_keys(p)
+        self._state = _ZipCryptoState(pwd)
 
         # The first 12 bytes in the cypher stream is an encryption header
         # used to strengthen the algorithm. The first 11 bytes are completely
         # random, while the 12th contains the MSB of the CRC, or the MSB of
         # the file time depending on the header type and is used to check
         # the correctness of the password.
-        h = self.decrypt(encryption_header[0:12])
+        h = self.decrypt(encryption_header)
         if zinfo.use_datadescripter:
             # compare against the file time from extended local headers
             check_byte = (zinfo._raw_time >> 8) & 0xFF
@@ -112,7 +152,7 @@ class ZipCryptoDecrypter(BaseZipDecrypter):
         Returns:
             int: Updated 32-bit CRC value.
         """
-        return (crc >> 8) ^ self.crctable[(crc ^ ch) & 0xFF]
+        return self._state.crc32(ch, crc)
 
     def update_keys(self, c: int) -> None:
         """Update the three internal keys with a plaintext byte.
@@ -121,10 +161,7 @@ class ZipCryptoDecrypter(BaseZipDecrypter):
             c (int): The plaintext byte value (0–255) used to advance
                 the key schedule.
         """
-        self.key0 = self.crc32(c, self.key0)
-        self.key1 = (self.key1 + (self.key0 & 0xFF)) & 0xFFFFFFFF
-        self.key1 = (self.key1 * 134775813 + 1) & 0xFFFFFFFF
-        self.key2 = self.crc32(self.key1 >> 24, self.key2)
+        self._state.update_keys(c)
 
     def decrypt(self, data: bytes) -> bytes:
         """Decrypt a chunk of ciphertext.
@@ -135,13 +172,7 @@ class ZipCryptoDecrypter(BaseZipDecrypter):
         Returns:
             bytes: Decrypted plaintext of the same length as *data*.
         """
-        result = bytearray()
-        for c in data:
-            k = self.key2 | 2
-            c ^= ((k * (k ^ 1)) >> 8) & 0xFF
-            self.update_keys(c)
-            result.append(c)
-        return bytes(result)
+        return self._state.decrypt(data)
 
 
 class ZipCryptoEncryptor(BaseZipEncryptor):
@@ -163,16 +194,14 @@ class ZipCryptoEncryptor(BaseZipEncryptor):
         Args:
             pwd (bytes): Encryption password as raw bytes.
         """
-        self.key0 = 305419896
-        self.key1 = 591751049
-        self.key2 = 878082192
-
-        self.crctable = _crctable
-
-        for p in pwd:
-            self.update_keys(p)
+        self._state = _ZipCryptoState(pwd)
 
         self._zinfo: ZipInfo | None = None
+
+    key0 = _state_property("key0")
+    key1 = _state_property("key1")
+    key2 = _state_property("key2")
+    crctable = _crctable
 
     def crc32(self, ch: int, crc: int) -> int:
         """Compute the CRC32 primitive on one byte.
@@ -184,7 +213,7 @@ class ZipCryptoEncryptor(BaseZipEncryptor):
         Returns:
             int: Updated 32-bit CRC value.
         """
-        return (crc >> 8) ^ self.crctable[(crc ^ ch) & 0xFF]
+        return self._state.crc32(ch, crc)
 
     def update_keys(self, c: int) -> None:
         """Update the three internal keys with a plaintext byte.
@@ -193,10 +222,7 @@ class ZipCryptoEncryptor(BaseZipEncryptor):
             c (int): The plaintext byte value (0–255) used to advance
                 the key schedule.
         """
-        self.key0 = self.crc32(c, self.key0)
-        self.key1 = (self.key1 + (self.key0 & 0xFF)) & 0xFFFFFFFF
-        self.key1 = (self.key1 * 134775813 + 1) & 0xFFFFFFFF
-        self.key2 = self.crc32(self.key1 >> 24, self.key2)
+        self._state.update_keys(c)
 
     def update_zipinfo(self, zipinfo: ZipInfo) -> None:
         """Set the data-descriptor flag and store the ZipInfo reference.
@@ -244,13 +270,7 @@ class ZipCryptoEncryptor(BaseZipEncryptor):
         Returns:
             bytes: Ciphertext of the same length as *data*.
         """
-        result = bytearray()
-        for c in data:
-            k = self.key2 | 2
-            t = ((k * (k ^ 1)) >> 8) & 0xFF
-            self.update_keys(c)  # update with plaintext
-            result.append(c ^ t)
-        return bytes(result)
+        return self._state.encrypt(data)
 
     def flush(self) -> bytes:
         """Finalise encryption.

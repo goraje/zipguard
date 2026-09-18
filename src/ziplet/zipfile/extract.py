@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from ziplet.zipfile.info import ZipInfo
 
 __all__ = [
+    "MemberAssessment",
     "ExtractMemberResult",
     "ExtractPolicy",
     "ExtractResult",
@@ -73,6 +74,25 @@ class ExtractViolation:
     message: str
     action: ViolationAction
     target: Path | None = None
+
+
+@dataclass(frozen=True)
+class MemberAssessment:
+    """Immutable result of evaluating one archive member for extraction."""
+
+    info: "ZipInfo"
+    target: Path | None
+    violations: tuple[ExtractViolation, ...]
+    is_symlink: bool
+    is_special: bool
+
+    @property
+    def has_errors(self) -> bool:
+        return any(v.action == ViolationAction.ERROR for v in self.violations)
+
+    @property
+    def should_skip(self) -> bool:
+        return any(v.action == ViolationAction.SKIP for v in self.violations)
 
 
 @dataclass(frozen=True)

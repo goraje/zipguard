@@ -14,7 +14,7 @@ try:
 except ImportError:
     crc32 = binascii.crc32
 
-from ziplet.compression import registry
+from ziplet.compression import Registry, registry
 from ziplet.compression.methods import CompressorBase
 
 if TYPE_CHECKING:
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 from ziplet.cryptography.base import BaseZipEncryptor
 from ziplet.zipfile.info import ZipInfo
 from ziplet.zipfile.shared import ZIP64_LIMIT
+from ziplet.zipfile.write_coordinator import WriterReservation
 
 __all__ = ["ZipWriteFile"]
 
@@ -55,6 +56,8 @@ class ZipWriteFile(io.BufferedIOBase):
         zinfo: ZipInfo,
         zip64: bool,
         encryptor: BaseZipEncryptor | None = None,
+        compression_registry: Registry = registry,
+        reservation: WriterReservation | None = None,
     ) -> None:
         """Initialise the write-file, emit the local header, and (if requested)
         the encryption header.
@@ -71,7 +74,7 @@ class ZipWriteFile(io.BufferedIOBase):
         self._zinfo: ZipInfo = zinfo
         self._zip64: bool = zip64
         self._zipfile: ZipFile = zf
-        self._compressor: CompressorBase | None = registry.get_compressor(
+        self._compressor: CompressorBase = compression_registry.get_compressor(
             zinfo.compress_type, zinfo.compress_level
         )
         self._encryptor: BaseZipEncryptor | None = encryptor
@@ -80,6 +83,7 @@ class ZipWriteFile(io.BufferedIOBase):
         self._crc: int = 0
         self._state = WriteState.ACTIVE
         self._error: BaseException | None = None
+        self._reservation = reservation
 
         if self._encryptor is not None:
             self._encryptor.update_zipinfo(self._zinfo)
@@ -163,8 +167,7 @@ class ZipWriteFile(io.BufferedIOBase):
 
         self._crc = crc32(data, self._crc)
         raw = data if isinstance(data, bytes) else bytes(data)
-        if self._compressor:
-            raw = self._compressor.compress(raw)
+        raw = self._compressor.compress(raw)
         if self._encryptor:
             raw = self._encryptor.encrypt(raw)
         self._compress_size += len(raw)
@@ -201,45 +204,25 @@ class ZipWriteFile(io.BufferedIOBase):
                         assert self._error is not None
                         raise self._error
                     return
-                self._state = WriteState.FINALIZING
+        self._state = WriteState.FINALIZING
+        if self._reservation is not None:
+            self._zipfile._write_coordinator.begin_finalization(self._reservation)
         elif self.closed:
             return
         try:
-            # Flush any data from the compressor.
-            buf = self._compressor.flush() if self._compressor else b""
-            if self._encryptor:
-                buf = self._encryptor.encrypt(buf)
-                buf += self._encryptor.flush()
-            self._compress_size += len(buf)
-            _write_all(self._fileobj, buf)
-
-            self._zinfo.compress_size = self._compress_size
-            self._zinfo.CRC = self._crc
-            self._zinfo.file_size = self._file_size
-
-            if not self._zip64:
-                if self._file_size > ZIP64_LIMIT:
-                    raise RuntimeError("File size unexpectedly exceeded ZIP64 limit")
-                if self._compress_size > ZIP64_LIMIT:
-                    raise RuntimeError(
-                        "Compressed size unexpectedly exceeded ZIP64 limit"
-                    )
-
-            if self._zinfo.use_datadescripter:
-                _write_all(self._fileobj, self._zinfo.datadescripter(self._zip64))
-                self._zipfile.start_dir = self._fileobj.tell()
-            else:
-                self._zipfile.start_dir = self._fileobj.tell()
-                self._fileobj.seek(self._zinfo.header_offset)
-                _write_all(self._fileobj, self._zinfo.FileHeader(self._zip64))
-                self._fileobj.seek(self._zipfile.start_dir)
-
-            self._zipfile.filelist.append(self._zinfo)
-            self._zipfile.NameToInfo[self._zinfo.filename] = self._zinfo
+            self._write_final_payload()
+            self._update_metadata()
+            self._validate_sizes()
+            self._write_entry_trailer()
+            self._register_entry()
             self._state = WriteState.COMMITTED
+            if self._reservation is not None:
+                self._zipfile._write_coordinator.commit(self._reservation)
         except BaseException as exc:
             self._error = exc
             self._state = WriteState.FAILED
+            if self._reservation is not None:
+                self._zipfile._write_coordinator.fail(self._reservation, exc)
             raise
         finally:
             self._zipfile._writing = False
@@ -249,6 +232,39 @@ class ZipWriteFile(io.BufferedIOBase):
                     self._zipfile._active_writer = None
                     condition.notify_all()
             super().close()
+
+    def _write_final_payload(self) -> None:
+        """Flush compression/encryption and write the final payload bytes."""
+        data = self._compressor.flush()
+        if self._encryptor:
+            data = self._encryptor.encrypt(data) + self._encryptor.flush()
+        self._compress_size += len(data)
+        _write_all(self._fileobj, data)
+
+    def _update_metadata(self) -> None:
+        self._zinfo.compress_size = self._compress_size
+        self._zinfo.CRC = self._crc
+        self._zinfo.file_size = self._file_size
+
+    def _validate_sizes(self) -> None:
+        if not self._zip64 and self._file_size > ZIP64_LIMIT:
+            raise RuntimeError("File size unexpectedly exceeded ZIP64 limit")
+        if not self._zip64 and self._compress_size > ZIP64_LIMIT:
+            raise RuntimeError("Compressed size unexpectedly exceeded ZIP64 limit")
+
+    def _write_entry_trailer(self) -> None:
+        if self._zinfo.use_data_descriptor:
+            _write_all(self._fileobj, self._zinfo.data_descriptor(self._zip64))
+            self._zipfile.start_dir = self._fileobj.tell()
+            return
+        self._zipfile.start_dir = self._fileobj.tell()
+        self._fileobj.seek(self._zinfo.header_offset)
+        _write_all(self._fileobj, self._zinfo.FileHeader(self._zip64))
+        self._fileobj.seek(self._zipfile.start_dir)
+
+    def _register_entry(self) -> None:
+        self._zipfile.filelist.append(self._zinfo)
+        self._zipfile.NameToInfo[self._zinfo.filename] = self._zinfo
 
 
 def _write_all(fileobj: IO[bytes], data: bytes) -> None:

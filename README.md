@@ -291,6 +291,72 @@ The package exports these primary entry points:
 - `ZIP_STORED`, `ZIP_DEFLATED`, `ZIP_BZIP2`, `ZIP_LZMA`, `ZIP_ZSTANDARD`
 - `WzAesExtra`
 
+### Assessment And Extraction
+
+Policy-enabled extraction is a two-stage operation. Metadata is assessed first;
+only members whose effective policy action permits it are materialized. The
+assessment stage does not open, decrypt, decompress, or write member payloads.
+`ZipFile.inspect()` exposes this metadata-only behavior through an
+`InspectionResult`. `MemberAssessment` describes the normalized target, entry
+type, and violations for one member; `ArchiveAssessment` is available for
+applications that need to build security tooling around the shared assessment
+model.
+
+For callers that need the shared lower-level model directly, use
+`ZipFile.assess()`:
+
+```python
+with ZipFile("input.zip") as zf:
+    assessment = zf.assess(
+        "out",
+        ExtractPolicy(max_compression_ratio=100.0),
+    )
+
+for member in assessment.members:
+    print(member.info.filename, member.target, member.violations)
+```
+
+`ViolationAction.ERROR`, `WARN`, and `SKIP` control ordinary policy findings.
+Security-critical path and file-type findings remain errors when `WARN` is
+selected. `preview_only=True` performs assessment and returns member results
+without creating or modifying the destination. An `ExtractionError` contains
+the partial `ExtractResult` in its `result` attribute.
+
+Regular files are written to a temporary file in the destination directory and
+atomically committed only after the member has been fully read and quota checks
+have succeeded. Existing files are therefore preserved when a member fails.
+Symlinks and special files are rejected by default. Allowed symlinks are
+materialized without following their targets, and supported FIFOs can be
+materialized on platforms that provide `os.mkfifo`. Descriptor-backed
+no-follow checks are used where the platform exposes the required APIs; other
+platforms use the strongest path-based checks available.
+
+### Compression Registries
+
+Each `ZipFile` receives an archive-local snapshot of the compression registry.
+Applications can provide a custom `Registry` with the `compression_registry=`
+constructor option. Registering or replacing a method in one archive does not
+change other archives or the module-level default registry. Stored entries use
+the same no-op compressor/decompressor strategy as other compression methods.
+The snapshot is taken when the archive is constructed, so later changes to the
+module-level registry do not affect an existing `ZipFile`.
+
+### ZipInfo Compatibility Names
+
+ZIP header serialization is side-effect-free: calling `ZipInfo.FileHeader()` or
+`ZipInfo.central_directory()` calculates effective ZIP versions without
+rewriting the `ZipInfo` object's `create_version` or `extract_version` fields.
+Prefer these correctly spelled data-descriptor APIs:
+
+- `use_data_descriptor`
+- `encode_data_descriptor()`
+- `data_descriptor()`
+
+The historical CPython-derived spellings remain supported as compatibility
+aliases: `use_datadescripter`, `encode_datadescripter()`, and
+`datadescripter()`. The `_compresslevel` alias likewise remains available for
+compatibility with code using the CPython-style metadata attribute.
+
 ## Notes
 
 - `ZIP_ZSTANDARD` compression requires a Python runtime that provides zstandard support

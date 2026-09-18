@@ -4,14 +4,17 @@ from ziplet.compression import (
     ZIP_LZMA,
     ZIP_STORED,
     ZIP_ZSTANDARD,
+    Registry,
 )
 from ziplet.cryptography import WZ_AES, WZ_AES_V1, WZ_AES_V2, ZIP_CRYPTO
+from ziplet.zipfile.assessment import ArchiveAssessment, ExtractionContext
 from ziplet.zipfile.extract import (
     ExtractionError,
     ExtractMemberResult,
     ExtractPolicy,
     ExtractResult,
     ExtractViolation,
+    MemberAssessment,
     MemberStatus,
     OverwritePolicy,
     ViolationAction,
@@ -39,6 +42,7 @@ __all__ = [
     "ZIP_BZIP2",
     "ZIP_LZMA",
     "ZIP_ZSTANDARD",
+    "Registry",
     "ZipFile",
     "is_zipfile",
     "INHERIT_ENCRYPTION",
@@ -49,6 +53,9 @@ __all__ = [
     "ExtractViolation",
     "ExtractionError",
     "MemberStatus",
+    "MemberAssessment",
+    "ArchiveAssessment",
+    "ExtractionContext",
     "OverwritePolicy",
     "ViolationAction",
     "InspectionMember",

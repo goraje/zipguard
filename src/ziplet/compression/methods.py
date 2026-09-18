@@ -17,6 +17,8 @@ __all__ = [
     "DecompressorBase",
     "StreamingDecompressor",
     "CompressionEntry",
+    "NoopCompressor",
+    "NoopDecompressor",
 ]
 
 # ---------------------------------------------------------------------------
@@ -53,12 +55,18 @@ class CompressorBase(ABC):
 
     @abstractmethod
     def flush(self) -> bytes:
-        """Flushes any remaining buffered data and finalizes the stream.
-
-        Returns:
-            The remaining compressed bytes.
-        """
+        """Flushes any remaining buffered data and finalizes the stream."""
         ...
+
+
+class NoopCompressor(CompressorBase):
+    """Pass-through compressor used for ``ZIP_STORED`` entries."""
+
+    def compress(self, data: bytes) -> bytes:
+        return data
+
+    def flush(self) -> bytes:
+        return b""
 
 
 class DecompressorBase(ABC):
@@ -77,16 +85,19 @@ class DecompressorBase(ABC):
 
     @abstractmethod
     def decompress(self, data: bytes, max_length: int = -1) -> bytes:
-        """Decompresses a chunk of data.
-
-        Args:
-            data: The compressed bytes to decompress.
-            max_length: Maximum output size, or ``-1`` for no limit.
-
-        Returns:
-            Decompressed bytes.
-        """
+        """Decompress a chunk of data."""
         ...
+
+
+class NoopDecompressor(DecompressorBase):
+    """Pass-through decompressor used for ``ZIP_STORED`` entries."""
+
+    @property
+    def eof(self) -> bool:
+        return False
+
+    def decompress(self, data: bytes, max_length: int = -1) -> bytes:
+        return data if max_length < 0 else data[:max_length]
 
 
 class StreamingDecompressor(DecompressorBase):

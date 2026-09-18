@@ -27,3 +27,16 @@ def test_inspection_does_not_open_payloads_or_modify_files(
     assert report.members[0].member == "payload.txt"
     assert sentinel.read_text() == "unchanged"
     assert not (tmp_path / "output").exists()
+
+
+def test_assess_returns_shared_archive_assessment(tmp_path: Path) -> None:
+    archive = tmp_path / "assessment.zip"
+    with ziplet.ZipFile(archive, "w") as zf:
+        zf.writestr("payload.txt", b"payload")
+
+    with ziplet.ZipFile(archive) as zf:
+        assessment = zf.assess(tmp_path / "output")
+
+    assert assessment.total_uncompressed_size == len(b"payload")
+    assert assessment.members[0].info.filename == "payload.txt"
+    assert not (tmp_path / "output").exists()
